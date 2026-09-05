@@ -204,7 +204,8 @@ if kind == "opencode":
     doc.setdefault("$schema", "https://opencode.ai/config.json")
     prov = doc.setdefault("provider", {}).setdefault("meta-bridge", {})
     prov.update({"npm": "@ai-sdk/openai", "name": "Meta via Muse bridge",
-                 "options": {"baseURL": "http://127.0.0.1:8915/v1"}})
+                 "options": {"baseURL": "http://127.0.0.1:8915/v1",
+                             "forceReasoning": True}})
     models = prov.setdefault("models", {})
     for mid, name in (("muse-spark-1.3", "Muse Spark 1.3"),
                       ("muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor")):

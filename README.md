@@ -178,7 +178,8 @@ Run the login command again and approve faster.
      "meta-bridge": {
        "npm": "@ai-sdk/openai",
        "name": "Meta via Muse bridge",
-       "options": { "baseURL": "http://127.0.0.1:8915/v1" },
+       "options": { "baseURL": "http://127.0.0.1:8915/v1",
+         "forceReasoning": true },
        "models": {
          "muse-spark-1.3": {
            "name": "Muse Spark 1.3",
