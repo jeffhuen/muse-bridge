@@ -116,7 +116,15 @@ Run the login command again and approve faster.
        "models": {
          "muse-spark-1.3": {
            "name": "Muse Spark 1.3",
-           "limit": { "context": 1048576, "output": 256000 }
+           "limit": { "context": 1048576, "output": 256000 },
+           "variants": {
+             "minimal": { "reasoningEffort": "minimal" },
+             "low": { "reasoningEffort": "low" },
+             "medium": { "reasoningEffort": "medium" },
+             "high": { "reasoningEffort": "high" },
+             "xhigh": { "reasoningEffort": "xhigh" },
+             "max": { "reasoningEffort": "max" }
+           }
          }
        }
      }
