@@ -87,6 +87,13 @@ def base_dir():
     return d
 
 
+def _debug_on():
+    try:
+        return os.path.exists(os.path.join(base_dir(), "debug"))
+    except Exception:
+        return False
+
+
 def identity_path():
     return os.path.join(base_dir(), "identity.json")
 
@@ -329,6 +336,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 payload = json.loads(body)
                 payload.setdefault("prompt_cache_retention", "24h")
+                if _debug_on():
+                    print("req model=%s reasoning=%s" % (payload.get("model"), payload.get("reasoning")), flush=True)
                 reasoning = payload.get("reasoning")
                 if isinstance(reasoning, dict) and reasoning.get("effort") in (None, "none"):
                     payload.pop("reasoning", None)
