@@ -78,7 +78,17 @@ keys from it on its own.
    python3 ~/.config/muse-bridge/bridge.py login
    ```
 2. The command prints a web address and a user code. Open the address
-   in your browser. Type the code. Approve the request.
+   in your browser. The page shows a box for the code. Type the code
+   from your terminal. Approve the request on the Meta page. Return
+   to your terminal and wait. A full run looks like this
+   (your code will differ):
+   ```text
+   Approve in browser: https://auth.meta.com/oauth/device/?code=XXXX-XXXX
+   User code: XXXX-XXXX (expires in 600s)
+   identity stored (0600). Mint works.
+   ```
+   The middle line means the terminal is waiting for you. Nothing
+   proceeds until you approve in the browser.
 3. Wait for this line: `identity stored (0600). Mint works.`
    Expected result: the file `identity.json` now exists and only you
    can read it. Check:
