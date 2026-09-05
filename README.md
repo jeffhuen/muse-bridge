@@ -4,6 +4,22 @@ Use your Meta login in any coding tool. The bridge runs on your own
 machine. It gives your tools a fresh API key when they need one. You
 log in one time. Your tools then just work.
 
+## Quick install (easy path)
+
+```bash
+git clone https://github.com/jeffhuen/muse-bridge.git ~/.config/muse-bridge
+~/.config/muse-bridge/install.sh
+```
+
+With no flags it asks which harness to wire: OpenCode, pi, or both.
+Use `--opencode` and/or `--pi` to skip the question. The script does
+every step below in order: files, daemon, login (it opens the browser
+for you), then the harness config. It backs up any config it touches
+and it is safe to run again. After it finishes, do the two in-tool
+steps under OpenCode/pi below (`/connect`, `/model`).
+
+If you prefer each step by hand, read on.
+
 ## Terms used in this file
 
 - **Bridge**: the small server in this folder. It listens only on your
