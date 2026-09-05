@@ -14,6 +14,23 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; };
 need python3
 need curl
 
+OS_NAME="$(uname -s)"
+IS_WSL=0
+if [ -r /proc/version ] && grep -qi 'microsoft\|wsl' /proc/version 2>/dev/null; then IS_WSL=1; fi
+open_url() {
+  if [ "${OS_NAME}" = "Darwin" ]; then
+    open "$1"
+  elif [ "${IS_WSL}" -eq 1 ] && command -v wslview >/dev/null 2>&1; then
+    wslview "$1"
+  elif [ "${IS_WSL}" -eq 1 ]; then
+    powershell.exe -NoProfile -Command "Start-Process '$1'" 2>/dev/null || echo "Open: $1"
+  elif command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "$1"
+  else
+    echo "Open: $1"
+  fi
+}
+
 DO_OPENCODE=0; DO_PI=0; DO_UNINSTALL=0; DO_PURGE=0
 for arg in "$@"; do
   case "$arg" in
@@ -27,7 +44,13 @@ done
 
 if [ "$DO_UNINSTALL" -eq 1 ]; then
   echo "==> Uninstalling muse-bridge"
-  launchctl unload "${PLIST}" 2>/dev/null || true
+  if [ "$(uname -s)" = "Darwin" ]; then
+    launchctl unload "${PLIST}" 2>/dev/null || true
+  else
+    systemctl --user disable --now muse-bridge.service 2>/dev/null || true
+    rm -f "${HOME}/.config/systemd/user/muse-bridge.service"
+    systemctl --user daemon-reload 2>/dev/null || true
+  fi
   pkill -f muse-bridge/bridge.py 2>/dev/null || true
   rm -f "${PLIST}"
   if [ "$DO_PURGE" -eq 1 ]; then
@@ -61,9 +84,10 @@ if [ "${SRC_DIR}" != "${BRIDGE_DIR}" ]; then
   cp "${SRC_DIR}/bridge.py" "${BRIDGE_DIR}/bridge.py"
 fi
 
-echo "==> Starting daemon (LaunchAgent)"
-mkdir -p "$(dirname "${PLIST}")"
-cat > "${PLIST}" <<PLEOF
+echo "==> Starting daemon"
+start_darwin() {
+  mkdir -p "$(dirname "${PLIST}")"
+  cat > "${PLIST}" <<PLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -86,11 +110,43 @@ cat > "${PLIST}" <<PLEOF
 </dict>
 </plist>
 PLEOF
-if launchctl list 2>/dev/null | grep -q com.jeffhuen.muse-bridge; then
-  launchctl kickstart -k "gui/$(id -u)/com.jeffhuen.muse-bridge" >/dev/null 2>&1 || true
-else
-  launchctl load "${PLIST}" 2>&1 || true
-fi
+  if launchctl list 2>/dev/null | grep -q com.jeffhuen.muse-bridge; then
+    launchctl kickstart -k "gui/$(id -u)/com.jeffhuen.muse-bridge" >/dev/null 2>&1 || true
+  else
+    launchctl load "${PLIST}" 2>&1 || true
+  fi
+}
+start_linux() {
+  UNIT_DIR="${HOME}/.config/systemd/user"
+  if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    mkdir -p "${UNIT_DIR}"
+    cat > "${UNIT_DIR}/muse-bridge.service" <<'SVCEOF'
+[Unit]
+Description=muse-bridge Meta OAuth proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/env python3 %h/.config/muse-bridge/bridge.py
+Restart=always
+RestartSec=3
+StandardOutput=append:%h/.config/muse-bridge/bridge.log
+StandardError=append:%h/.config/muse-bridge/bridge.log
+
+[Install]
+WantedBy=default.target
+SVCEOF
+    systemctl --user daemon-reload
+    systemctl --user enable --now muse-bridge.service
+  else
+    echo "No systemd user session here (plain WSL?). Starting without auto-restart."
+    pkill -f muse-bridge/bridge.py 2>/dev/null || true
+    nohup python3 "${BRIDGE_DIR}/bridge.py" > "${BRIDGE_DIR}/bridge.log" 2>&1 &
+    echo "It will NOT survive reboot here. Re-run install.sh after restart,"
+    echo "or enable systemd in WSL and re-run."
+  fi
+}
+if [ "${OS_NAME}" = "Darwin" ]; then start_darwin; else start_linux; fi
 sleep 3
 
 probe() { curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${BASE_URL}/models"; }
@@ -112,7 +168,7 @@ else
   done
   if [ -z "${URL}" ]; then echo "login did not start; see login.log" >&2; exit 1; fi
   grep 'User code:' "${BRIDGE_DIR}/login.log" || true
-  command -v open >/dev/null 2>&1 && open "${URL}" || echo "Open: ${URL}"
+  open_url "${URL}"
   echo "Approve in the browser, then wait here..."
   wait "${LOGIN_PID}"
   trap - INT TERM

@@ -17,10 +17,30 @@ log in one time. Your tools then just work.
 
 ## What you need before you start
 
-- A Mac with Python 3. No extra packages are required.
+- A Mac or Linux machine with Python 3 (3.8+). No extra packages
+  are required. On WSL2, run everything inside the Linux distro.
 - A Meta developer account with access to the Model API.
 - One of these tools: OpenCode, pi, or any tool that accepts a custom
   server address (`baseURL`).
+
+## Linux and WSL notes
+
+- The bridge itself (`bridge.py`) is portable: Python standard parts
+  only, no Mac-only calls.
+- Persistence differs by system, and the installer picks for you. Mac
+  uses a LaunchAgent. Linux with systemd uses a user service (check
+  it with `systemctl --user status muse-bridge`). Plain WSL without
+  systemd falls back to a manual background start that does not
+  survive reboot.
+- The installer opens the login page with `open` (Mac), `xdg-open`
+  (Linux), or your Windows browser (WSL). If none works, it prints
+  the address for you to open by hand.
+- On WSL2, `localhost` is shared with Windows, so a Windows-side tool
+  can also reach `http://127.0.0.1:8915`. Keep the bridge inside the
+  distro that holds your login.
+- Maintain commands differ: Mac uses the `launchctl` lines under
+  Maintain; on systemd Linux use
+  `systemctl --user restart|stop|status muse-bridge`.
 
 ## Where the files live
 
