@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # muse-bridge one-shot installer.
 # Usage: ./install.sh [--opencode] [--pi]   (no flag = ask)
+#        ./install.sh --uninstall [--purge]
 # Does: daemon + login (opens browser) + harness config. Safe to re-run.
 set -euo pipefail
 
@@ -13,14 +14,35 @@ need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; };
 need python3
 need curl
 
-DO_OPENCODE=0; DO_PI=0
+DO_OPENCODE=0; DO_PI=0; DO_UNINSTALL=0; DO_PURGE=0
 for arg in "$@"; do
   case "$arg" in
     --opencode) DO_OPENCODE=1 ;;
     --pi) DO_PI=1 ;;
-    *) echo "unknown flag: $arg (use --opencode and/or --pi)" >&2; exit 1 ;;
+    --uninstall) DO_UNINSTALL=1 ;;
+    --purge) DO_PURGE=1 ;;
+    *) echo "unknown flag: $arg (use --opencode/--pi/--uninstall/--purge)" >&2; exit 1 ;;
   esac
 done
+
+if [ "$DO_UNINSTALL" -eq 1 ]; then
+  echo "==> Uninstalling muse-bridge"
+  launchctl unload "${PLIST}" 2>/dev/null || true
+  pkill -f muse-bridge/bridge.py 2>/dev/null || true
+  rm -f "${PLIST}"
+  if [ "$DO_PURGE" -eq 1 ]; then
+    rm -rf "${BRIDGE_DIR}"
+    echo "Purged ${BRIDGE_DIR} (login included)."
+  else
+    echo "Daemon stopped and auto-start removed."
+    echo "Kept: ${BRIDGE_DIR} (login + logs). Re-run install.sh to restore,"
+    echo "  or re-run with --purge to delete everything."
+  fi
+  echo "Optional harness cleanup:"
+  echo "  OpenCode: delete the meta-bridge block in ~/.config/opencode/opencode.json"
+  echo "  pi: delete the meta-bridge block in ~/.pi/agent/models.json"
+  exit 0
+fi
 if [ "$DO_OPENCODE" -eq 0 ] && [ "$DO_PI" -eq 0 ]; then
   echo "Configure which harness?"
   echo "  1) OpenCode  2) pi  3) both"

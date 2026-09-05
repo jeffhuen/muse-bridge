@@ -233,10 +233,20 @@ above is free. Use `/models` for connection checks.
   ```bash
   launchctl kickstart -k gui/$(id -u)/com.jeffhuen.muse-bridge
   ```
-- **Stop it.** Run:
+- **Stop it (keeps everything).** Run:
   ```bash
   launchctl unload ~/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist
   ```
+  Start again with the kickstart command above.
+- **Uninstall it.** Run:
+  ```bash
+  ~/.config/muse-bridge/install.sh --uninstall
+  ```
+  This stops the daemon and removes auto-start. Your login and logs
+  stay put, so reinstalling later just works. Add `--purge` to delete
+  the whole folder including the login. Either way, delete the
+  `meta-bridge` block from your tool configs by hand if you no
+  longer want the entries.
 - **Log in again.** If requests fail with a mint error, the login has
   died. Run `python3 ~/.config/muse-bridge/bridge.py login` again.
   You do not need to touch your tools.
