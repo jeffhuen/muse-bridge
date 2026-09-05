@@ -4,11 +4,15 @@
 Own OAuth device flow (same endpoints pi-meta-oauth uses):
   python3 bridge.py login   # approve in browser once, stores identity (0600)
 Daemon forwards /v1/* to api.meta.ai, minting a Model API key daily.
+Upstream uses a pooled keep-alive connection set shared across handler
+threads, so steady-state requests skip the TLS handshake.
 No secrets are logged.
 """
+import http.client
 import json
 import os
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -16,6 +20,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 UPSTREAM = "https://api.meta.ai/v1"
+UPSTREAM_HOST = "api.meta.ai"
 MINT_URL = "https://api.meta.ai/muse-code/key"
 AUTH_BASE = "https://auth.meta.com"
 CLIENT_ID = "1031625952748946"
@@ -25,6 +30,55 @@ DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code"
 PORT = 8915
 KEY_TTL = 20 * 3600
 CHUNK = 65536
+MAX_BODY = 25 * 1024 * 1024
+MAX_IDLE_CONNS = 16
+IDLE_CONN_TTL = 60
+MAX_UPSTREAM_FLIGHTS = 64
+SOCKET_TIMEOUT = 300
+
+# --- shared upstream connection pool (keep-alive across threads) ---
+
+_idle_conns = []
+_idle_lock = threading.Lock()
+
+
+def _pool_take():
+    now = time.monotonic()
+    with _idle_lock:
+        while _idle_conns:
+            conn, stamped = _idle_conns.pop()
+            if now - stamped < IDLE_CONN_TTL:
+                return conn
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return http.client.HTTPSConnection(UPSTREAM_HOST, timeout=SOCKET_TIMEOUT)
+
+
+def _pool_give(conn):
+    with _idle_lock:
+        if len(_idle_conns) < MAX_IDLE_CONNS:
+            _idle_conns.append((conn, time.monotonic()))
+            return
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+def _pool_drop(conn):
+    try:
+        conn.close()
+    except Exception:
+        pass
+
+
+# --- key state (mint lock stops stampedes on expiry) ---
+
+_state = {"key": None, "at": 0.0}
+_key_lock = threading.Lock()
+_upstream_sem = threading.BoundedSemaphore(MAX_UPSTREAM_FLIGHTS)
 
 
 def base_dir():
@@ -160,44 +214,117 @@ def load_direct_keys():
     return keys
 
 
-_state = {"key": None, "at": 0.0}
-
-
-def current_key():
-    if _state["key"] and time.time() - _state["at"] < KEY_TTL:
-        return _state["key"]
+def _resolve_key():
     ident, src = load_identity()
     if ident:
         try:
-            key = mint_api_key(ident)[0] if isinstance(mint_api_key(ident), tuple) else None
+            key, _ = mint_api_key(ident)
         except Exception as exc:
             print("mint via %s failed: %s" % (src, exc), flush=True)
         else:
             if key:
-                _state.update(key=key, at=time.time())
                 print("minted key via %s" % src, flush=True)
                 return key
             print("mint via %s returned no key" % src, flush=True)
     for var, val in load_direct_keys():
-        _state.update(key=val, at=time.time())
         print("using direct key from %s" % var, flush=True)
         return val
     raise RuntimeError("no usable credential; run `python3 bridge.py login` once")
 
 
+def current_key():
+    fresh = _state["key"]
+    if fresh and time.time() - _state["at"] < KEY_TTL:
+        return fresh
+    with _key_lock:
+        fresh = _state["key"]
+        if fresh and time.time() - _state["at"] < KEY_TTL:
+            return fresh
+        print("resolving key", flush=True)
+        key = _resolve_key()
+        _state.update(key=key, at=time.time())
+        return key
+
+
+def invalidate_key():
+    with _key_lock:
+        _state["key"] = None
+
+
+def _exchange(method, path, headers, body):
+    """One upstream round trip. Returns (kind, status, payload, conn).
+
+    kind is 'error' with payload=bytes, or 'stream' with
+    payload=response object and conn checked out until closed.
+    Retries once on a dead pooled connection (safe: buffered body)."""
+    for attempt in range(2):
+        conn = _pool_take()
+        try:
+            conn.request(method, path, body=body, headers=headers)
+            resp = conn.getresponse()
+        except Exception:
+            _pool_drop(conn)
+            if attempt == 1:
+                raise
+            continue
+        if resp.status >= 400:
+            data = resp.read(1024 * 1024 + 1)
+            _pool_give(conn)
+            return ("error", resp.status, data, None)
+        return ("stream", resp.status, resp, conn)
+    raise RuntimeError("unreachable")
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    server_version = "muse-bridge/1.0"
+    server_version = "muse-bridge/1.1"
 
     def log_message(self, *args):
         pass
 
-    def _proxy(self):
+    def _read_body(self):
         try:
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
             length = 0
-        body = self.rfile.read(length) if length > 0 else None
+        if length > MAX_BODY:
+            return None, True
+        if length > 0:
+            return self.rfile.read(length), False
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            chunks = []
+            total = 0
+            while True:
+                line = self.rfile.readline(128).split(b";")[0].strip()
+                try:
+                    size = int(line, 16)
+                except ValueError:
+                    break
+                if size <= 0:
+                    self.rfile.readline(128)
+                    break
+                total += size
+                if total > MAX_BODY:
+                    return None, True
+                chunks.append(self.rfile.read(size))
+                self.rfile.readline(128)
+            return b"".join(chunks) or None, False
+        return None, False
+
+    def _send_json(self, code, obj):
+        out = json.dumps(obj).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.end_headers()
+        self.wfile.write(out)
+
+    def _proxy(self):
+        body, too_big = self._read_body()
+        if too_big:
+            self.close_connection = True
+            self._send_json(413, {"error": "request body exceeds bridge limit"})
+            return
         if self.path.startswith("/v1/responses") and body:
             try:
                 payload = json.loads(body)
@@ -211,46 +338,82 @@ class Handler(BaseHTTPRequestHandler):
         try:
             key = current_key()
         except Exception as exc:
-            out = json.dumps({"error": str(exc)}).encode()
-            self.send_response(503)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(out)))
-            self.end_headers()
-            self.wfile.write(out)
+            self._send_json(503, {"error": str(exc)})
             return
         if self.path.startswith("/v1"):
-            url = UPSTREAM + self.path[3:]
+            upstream_path = self.path
         else:
-            url = UPSTREAM + self.path
+            upstream_path = "/v1" + self.path
         headers = {"Accept": "application/json", "Authorization": "Bearer " + key}
         if body:
             headers["Content-Type"] = self.headers.get("Content-Type", "application/json")
-        req = urllib.request.Request(url, data=body, headers=headers, method=self.command)
-        try:
-            upstream = urllib.request.urlopen(req, timeout=300)
-        except urllib.error.HTTPError as exc:
-            data = exc.read()
-            if exc.code == 401:
-                _state["key"] = None
-            self.send_response(exc.code)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+        if not _upstream_sem.acquire(timeout=60):
+            self._send_json(503, {"error": "bridge busy; retry"})
             return
-        self.send_response(upstream.status)
-        self.send_header("Content-Type", upstream.headers.get("Content-Type", "application/json"))
-        self.close_connection = True
-        self.end_headers()
         try:
-            while True:
-                chunk = upstream.read(CHUNK)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
-                self.wfile.flush()
+            result = self._forward(upstream_path, headers, body, key)
         finally:
-            upstream.close()
+            _upstream_sem.release()
+        if result is not None:
+            self._send_json(result[0], result[1])
+
+    def _forward(self, upstream_path, headers, body, key):
+        """Returns (code, obj) for JSON errors, else streams and returns None."""
+        for attempt in range(2):
+            try:
+                kind, status, payload, conn = _exchange(self.command, upstream_path, headers, body)
+            except Exception as exc:
+                return 502, {"error": "upstream unreachable: %s" % exc}
+            if kind == "error":
+                print("upstream %s %s -> %s" % (self.command, upstream_path, status), flush=True)
+                if status == 401:
+                    invalidate_key()
+                    if attempt == 0:
+                        try:
+                            key = current_key()
+                        except Exception as exc:
+                            return 503, {"error": str(exc)}
+                        headers["Authorization"] = "Bearer " + key
+                        continue
+                try:
+                    obj = json.loads(payload.decode() or "{}")
+                except Exception:
+                    obj = {"error": "upstream HTTP %s" % status}
+                self.send_response(status)
+                raw = json.dumps(obj).encode()
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return None
+            resp, conn = payload, conn
+            self.send_response(status)
+            self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
+            self.close_connection = True
+            self.end_headers()
+            clean = False
+            try:
+                while True:
+                    chunk = resp.read(CHUNK)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+                    self.wfile.flush()
+                clean = True
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            finally:
+                try:
+                    if clean:
+                        resp.read()
+                except Exception:
+                    clean = False
+                if clean:
+                    _pool_give(conn)
+                else:
+                    _pool_drop(conn)
+            return None
+        return 502, {"error": "upstream retry exhausted"}
 
     do_GET = _proxy
     do_POST = _proxy
@@ -264,5 +427,6 @@ if __name__ == "__main__":
         do_login()
     else:
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+        server.daemon_threads = True
         print("muse-bridge listening on 127.0.0.1:%d" % PORT, flush=True)
         server.serve_forever()
