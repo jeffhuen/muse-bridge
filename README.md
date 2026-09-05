@@ -190,7 +190,7 @@ Run the login command again and approve faster.
              "medium": { "reasoningEffort": "medium" },
              "high": { "reasoningEffort": "high" },
              "xhigh": { "reasoningEffort": "xhigh" },
-             "max": { "reasoningEffort": "xhigh" }
+             "max": { "reasoningEffort": "max" }
            }
          }
        }
