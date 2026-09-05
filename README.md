@@ -1,146 +1,214 @@
 # muse-bridge
 
-Local OAuth bridge: use your Meta (Muse) login from any coding harness —
-OpenCode, pi, curl, SDKs — without pasting static `LLM|...` keys around.
+Use your Meta login in any coding tool. The bridge runs on your own
+machine. It gives your tools a fresh API key when they need one. You
+log in one time. Your tools then just work.
 
-It speaks the OpenAI **Responses** API on localhost and forwards everything
-to the Meta Model API with a daily-minted key.
+## Terms used in this file
 
-## Why this exists
+- **Bridge**: the small server in this folder. It listens only on your
+  own machine at `http://127.0.0.1:8915`.
+- **Harness**: any coding tool you point at the bridge. OpenCode and pi
+  are harnesses. A plain script is also a harness.
+- **Identity**: your Meta login, stored as a file. The bridge uses it
+  to mint keys. It is not a key itself.
+- **Key**: a short-lived API key. The bridge mints a new one about
+  one time per day. Tools send it with each request.
 
-Meta has two credential worlds that look identical but bill differently:
+## What you need before you start
 
-- **Manually created API keys** (`dev.meta.ai` → Create API key) are
-  **pay-as-you-go**. The dashboard table does not label this per row —
-  the `Name` column is just your own label.
-- The **Muse Code subscription** (flat monthly) is bound to the credential
-  auto-connected during `muse` onboarding. That credential is OAuth, and
-  the tokens live in the macOS **Keychain** — `~/.config/muse/auth.json`
-  only holds metadata (`mechanism: oauth`, `storage: keychain`,
-  `api_base_url`, your name/email). There is nothing to copy out of it.
+- A Mac with Python 3. No extra packages are required.
+- A Meta developer account with access to the Model API.
+- One of these tools: OpenCode, pi, or any tool that accepts a custom
+  server address (`baseURL`).
 
-`pi-muse-spark`-style extensions only accept static PAYG keys, and
-OpenCode custom providers cannot run an OAuth device flow. So this bridge
-runs the device flow **once**, stores its own identity, and mints Model
-API keys on demand for any local client.
+## Where the files live
 
-## Architecture / routing
+| File            | Purpose                                              |
+|-----------------|------------------------------------------------------|
+| `bridge.py`     | The bridge server and the login command.             |
+| `identity.json` | Your login. Created by the login step. Keep secret. |
+| `bridge.log`    | Log of key mints. Contains no secrets.              |
+| `login.log`     | Record of the last login.                           |
+| `README.md`     | This file.                                          |
 
+The folder is a git repo. Only `bridge.py`, `README.md`, and
+`.gitignore` are tracked. `identity.json` and all logs stay out of
+git. Do not force-add them.
+
+## Install the bridge
+
+Run each step in order.
+
+1. Check Python:
+   ```bash
+   python3 --version
+   ```
+   You need Python 3.8 or later.
+
+2. Keep this folder where it is:
+   `~/.config/muse-bridge`. The login step and the auto-start entry
+   both expect that path. If you move the folder, read
+   “Move the folder” below first.
+
+3. Start the bridge by hand to test it:
+   ```bash
+   nohup python3 ~/.config/muse-bridge/bridge.py > ~/.config/muse-bridge/bridge.log 2>&1 &
+   curl -s http://127.0.0.1:8915/v1/models | head -c 300; echo
+   ```
+   Expected result: a 503 error that tells you to run login. That
+   means the server runs but has no login yet. This is correct.
+
+4. Keep it running after reboot. The Mac entry for this is a
+   LaunchAgent. The file is:
+   `~/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist`.
+   It starts the bridge at login and restarts it if it stops.
+   Load it one time:
+   ```bash
+   launchctl load ~/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist
+   ```
+
+## Get the OAuth login
+
+You do this one time. The login stays valid. The bridge mints fresh
+keys from it on its own.
+
+1. Start the login:
+   ```bash
+   python3 ~/.config/muse-bridge/bridge.py login
+   ```
+2. The command prints a web address and a user code. Open the address
+   in your browser. Type the code. Approve the request.
+3. Wait for this line: `identity stored (0600). Mint works.`
+   Expected result: the file `identity.json` now exists and only you
+   can read it. Check:
+   ```bash
+   ls -l ~/.config/muse-bridge/identity.json
+   ```
+4. Confirm the bridge serves models (this call is free):
+   ```bash
+   curl -s http://127.0.0.1:8915/v1/models
+   ```
+   Expected result: a list that contains `muse-spark-1.3`.
+
+If approval takes too long, the code expires after about 10 minutes.
+Run the login command again and approve faster.
+
+## Use the bridge with OpenCode
+
+1. Open `~/.config/opencode/opencode.json`. Add this provider block:
+   ```json
+   "provider": {
+     "meta-bridge": {
+       "npm": "@ai-sdk/openai",
+       "name": "Meta via Muse bridge",
+       "options": { "baseURL": "http://127.0.0.1:8915/v1" },
+       "models": {
+         "muse-spark-1.3": {
+           "name": "Muse Spark 1.3",
+           "limit": { "context": 1048576, "output": 256000 }
+         }
+       }
+     }
+   }
+   ```
+2. In OpenCode, run `/connect`. Select `meta-bridge`. Type any dummy
+   value, for example `bridge`. The bridge sets the real key itself.
+   Your dummy value is ignored.
+3. Run `/models`. Select `meta-bridge/muse-spark-1.3`.
+4. Send a test message. Expected result: a normal answer.
+
+## Use the bridge with pi
+
+1. Open `~/.pi/agent/models.json`. Add this provider:
+   ```json
+   { "providers": { "meta-bridge": {
+     "baseUrl": "http://127.0.0.1:8915/v1",
+     "apiKey": "bridge",
+     "api": "openai-responses",
+     "models": [{ "id": "muse-spark-1.3", "name": "Muse Spark 1.3",
+       "reasoning": true, "input": ["text", "image"],
+       "contextWindow": 1048576, "maxTokens": 256000 }]
+   }}}
+   ```
+   The `apiKey` value can be any text. Pi requires the field. The
+   bridge replaces it with the real key.
+2. Select the model with `/model` and send a test message.
+
+## Use the bridge with anything else
+
+Any tool that accepts a custom OpenAI-style server works. Set its
+server address to `http://127.0.0.1:8915/v1` and its key to any dummy
+text. Example with curl (replace `MODEL` as needed):
+```bash
+curl -s http://127.0.0.1:8915/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"muse-spark-1.3","input":"Reply exactly: META_OK"}'
 ```
-┌──────────────┐   POST /v1/responses    ┌──────────────┐  POST /v1/responses  ┌───────────────┐
-│   harness    │ ────────────────────── │  muse-bridge │ ─────────────────── │ api.meta.ai   │
-│ opencode/pi/ │  http://127.0.0.1:8915 │  (this repo) │  https://api.meta.ai │  Meta Model   │
-│ curl / SDK   │  /v1/*  (any client    │              │  /v1/*  + Bearer     │  API          │
-└──────────────┘   auth, ignored)       └──────┬───────┘  minted key          └───────────────┘
-                                               │  daily: POST /muse-code/key
-                                               │  login: auth.meta.com OIDC device flow
-```
+Note: this call spends a small number of tokens. The `/models` call
+above is free. Use `/models` for connection checks.
 
-Per request the bridge:
+## Maintain the bridge
 
-1. Resolves a key: cached minted key (< 20h old) → else mint via stored
-   identity → else static `LLM_...` from env (`MUSE_BRIDGE_KEY`,
-   `META_API_KEY`, `MODEL_API_KEY`) or `muse/auth.json` → else `503`
-   telling you to run `bridge.py login`.
-2. Rewrites the request: strips any client `Authorization`, sets
-   `Bearer <key>`, preserves path/query/method/body.
-3. For `/v1/responses` JSON payloads: sets `prompt_cache_retention: "24h"`
-   when absent (Muse prompt cache is ~0% without it) and drops
-   `reasoning.effort: none` (Meta 400s on it).
-4. Streams the upstream response back chunk-by-chunk (SSE-safe).
-5. On upstream `401` it drops the cached key so the next request re-mints.
-   Other errors (e.g. `402 billing_not_configured`) pass through untouched —
-   they are account-side, not bridge bugs.
+- **Read the log.** Run `tail -f ~/.config/muse-bridge/bridge.log`.
+  Normal lines say `minted key via identity.json`. No line ever
+  contains a key.
+- **Restart it.** Run:
+  ```bash
+  launchctl kickstart -k gui/$(id -u)/com.jeffhuen.muse-bridge
+  ```
+- **Stop it.** Run:
+  ```bash
+  launchctl unload ~/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist
+  ```
+- **Log in again.** If requests fail with a mint error, the login has
+  died. Run `python3 ~/.config/muse-bridge/bridge.py login` again.
+  You do not need to touch your tools.
+- **Update it.** Pull or copy the new `bridge.py`, then restart with
+  the kickstart command above.
+- **Move the folder.** If you move it, fix two paths: the
+  `ProgramArguments` entry in the LaunchAgent file and any tool
+  config that names the folder. Then unload and reload the agent.
 
-Login (one time, `python3 bridge.py login`):
+## Fix common problems
 
-1. `POST https://auth.meta.com/oidc/device/authorization/`
-   (`client_id 1031625952748946`, same client pi-meta-oauth uses).
-2. Prints verification URL + user code; polls
-   `.../oidc/device/token/` handling `authorization_pending` / `slow_down` /
-   `access_denied` / `expired_token`.
-3. Mints via `POST https://api.meta.ai/muse-code/key`
-   (`x-api-version: 1.0.0`) to prove the identity works.
-4. Stores `identity.json` (`0600`). The identity is long-lived; API keys
-   derived from it rotate roughly daily.
+| Sign | Cause | Action |
+|------|-------|--------|
+| `503 no usable credential; run login` | No login stored yet, or it died | Run the login step again |
+| `402 billing_not_configured` | The Meta account has no valid billing | Fix billing at `dev.meta.ai`, then retry |
+| `401` from upstream, then recovery | The minted key expired early | No action. The bridge drops it and mints a new one on the next request |
+| Tool cannot reach `127.0.0.1:8915` | The bridge is not running | Check the log, then kickstart |
+| Blank `401 Authentication Error` at login mint | The approval did not grant API access | Check account access, then log in again |
 
-## Files
+## Security rules
 
-| File           | What                         | Committed? |
-|----------------|------------------------------|------------|
-| `bridge.py`    | Proxy + login, stdlib only   | yes        |
-| `README.md`    | This doc                     | yes        |
-| `.gitignore`   | Keeps secrets out of git     | yes        |
-| `identity.json`| OAuth identity (`0600`)      | **never**  |
-| `bridge.log`   | Daemon log (no secrets)      | never      |
-| `login.log`    | Last login transcript        | never      |
+- The bridge listens on `127.0.0.1` only. Do not change this to a
+  public address.
+- Treat `identity.json` like a password. Never paste it, mail it, or
+  commit it.
+- `bridge.log` never holds keys. You can share it when you ask for help.
+- Your `muse` tokens live in the macOS Keychain. This bridge keeps its
+  own separate login, so `muse` and the bridge do not disturb each
+  other.
 
-## Use with any harness
+## How it works, in short
 
-Anything that lets you set a custom `baseURL` works, because the bridge
-is just an OpenAI Responses endpoint.
+Each request passes through three steps. The bridge picks a key: it
+reuses a minted key younger than 20 hours, else mints one from the
+stored login, else falls back to a static `LLM_...` key from the
+environment. It then forwards your request to
+`https://api.meta.ai/v1`, swaps in the real key, and adds
+`prompt_cache_retention: 24h` to Responses calls so prompt caching
+works. It streams the answer back as it arrives.
 
-**OpenCode** (`~/.config/opencode/opencode.json`):
+## Limits you must know
 
-```json
-"provider": {
-  "meta-bridge": {
-    "npm": "@ai-sdk/openai",
-    "name": "Meta via Muse bridge",
-    "options": { "baseURL": "http://127.0.0.1:8915/v1" },
-    "models": {
-      "muse-spark-1.3": { "name": "Muse Spark 1.3",
-        "limit": { "context": 1048576, "output": 256000 } }
-    }
-  }
-}
-```
-
-Then `/connect` → `meta-bridge` → enter anything (the bridge sets real
-auth itself), `/models` → `meta-bridge/muse-spark-1.3`.
-
-**pi** (`~/.pi/agent/models.json`):
-
-```json
-{ "providers": { "meta-bridge": {
-  "baseUrl": "http://127.0.0.1:8915/v1",
-  "apiKey": "bridge",
-  "api": "openai-responses",
-  "models": [{ "id": "muse-spark-1.3", "name": "Muse Spark 1.3",
-    "reasoning": true, "input": ["text", "image"],
-    "contextWindow": 1048576, "maxTokens": 256000 }]
-}}}
-```
-
-(`apiKey` value is ignored by the bridge; pi just requires the field.)
-
-**curl / SDKs**: point `base_url` at `http://127.0.0.1:8915/v1`,
-any dummy key. `GET /v1/models` lists `muse-spark-1.3`,
-`1.3-contributor`, `1.2*`, `1.1`.
-
-## Run / maintain
-
-- macOS persistence: LaunchAgent `com.jeffhuen.muse-bridge`
-  (`~/Library/LaunchAgents/`), `RunAtLoad` + `KeepAlive`.
-- Logs: `tail -f ~/.config/muse-bridge/bridge.log`
-  (resolutions/mints only, keys never printed).
-- Re-login when minting fails: `python3 ~/.config/muse-bridge/bridge.py login`.
-- Running `muse` occasionally is **not** needed — the bridge refreshes
-  independently. Separate OAuth sessions, same Meta account.
-
-## Security notes
-
-- Binds `127.0.0.1` only. Never expose the port.
-- `identity.json` is as sensitive as a password: `0600`, gitignored.
-  Never paste it anywhere.
-- Contributor models (`*-contributor`, ~10x cheaper) let Meta train on
-  prompts/completions. Use standard `muse-spark-1.3` for private code.
-
-## Limitations
-
-- Depends on undocumented Meta endpoints + a pinned `client_id`. If Meta
-  rotates them, `login` breaks (static PAYG keys keep working) — the fix
-  is to mirror whatever `pi-meta-oauth` (MIT) updates to.
-- Key selects billing pool server-side: requests minted here bill to
-  whatever the identity is entitled to, PAYG keys bill PAYG. There is no
-  client-side "subscription first" ordering.
+- The bridge relies on Meta login pages that Meta does not document.
+  If Meta changes them, login breaks until `bridge.py` is updated.
+  Static pay-as-you-go keys still work in that case.
+- The server decides billing from the key you send. Keys you create by
+  hand on the dashboard bill pay-as-you-go. Keys the bridge mints bill
+  to what your login is entitled to. The bridge cannot pick
+  “subscription first”. The key picks the pool.
+- Cheap `*-contributor` models let Meta train on your prompts. Use
+  standard `muse-spark-1.3` for private code.
