@@ -146,12 +146,19 @@ Run the login command again and approve faster.
      "api": "openai-responses",
      "models": [{ "id": "muse-spark-1.3", "name": "Muse Spark 1.3",
        "reasoning": true, "input": ["text", "image"],
-       "contextWindow": 1048576, "maxTokens": 256000 }]
+       "contextWindow": 1048576, "maxTokens": 256000,
+       "thinkingLevelMap": { "off": null, "minimal": "minimal",
+         "low": "low", "medium": "medium", "high": "high",
+         "xhigh": "xhigh", "max": "max" } }]
    }}}
    ```
    The `apiKey` value can be any text. Pi requires the field. The
-   bridge replaces it with the real key.
+   bridge replaces it with the real key. `thinkingLevelMap` exposes
+   pi's thinking levels to the picker. `null` hides a level: `off`
+   is hidden because Meta rejects it.
 2. Select the model with `/model` and send a test message.
+3. Pick the thinking level in pi as usual. The bridge forwards the
+   level to Meta untouched.
 
 ## Use the bridge with anything else
 
