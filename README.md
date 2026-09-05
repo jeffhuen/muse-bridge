@@ -201,6 +201,17 @@ environment. It then forwards your request to
 `prompt_cache_retention: 24h` to Responses calls so prompt caching
 works. It streams the answer back as it arrives.
 
+## Credits and inspiration
+
+- [pi-meta-oauth](https://github.com/BlockedPath/pi-meta-oauth) (MIT)
+  by blockedredemption. It proved the flow this bridge copies: device
+  auth at `auth.meta.com`, key mint at `/muse-code/key`, Responses-only
+  traffic with `prompt_cache_retention: 24h`. Like this bridge, it uses
+  your own login and does not pose as the Muse Code app. No code was
+  copied. The Python here is a fresh take of the same three calls.
+- [pi-muse-spark](https://github.com/EclipseAditya/pi-muse-spark) (MIT)
+  for the static-key model table the fallback path still accepts.
+
 ## Limits you must know
 
 - The bridge relies on Meta login pages that Meta does not document.
