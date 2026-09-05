@@ -4,22 +4,6 @@ Use your Meta login in any coding tool. The bridge runs on your own
 machine. It gives your tools a fresh API key when they need one. You
 log in one time. Your tools then just work.
 
-## Quick install (easy path)
-
-```bash
-git clone https://github.com/jeffhuen/muse-bridge.git ~/.config/muse-bridge
-~/.config/muse-bridge/install.sh
-```
-
-With no flags it asks which harness to wire: OpenCode, pi, or both.
-Use `--opencode` and/or `--pi` to skip the question. The script does
-every step below in order: files, daemon, login (it opens the browser
-for you), then the harness config. It backs up any config it touches
-and it is safe to run again. After it finishes, do the two in-tool
-steps under OpenCode/pi below (`/connect`, `/model`).
-
-If you prefer each step by hand, read on.
-
 ## Terms used in this file
 
 - **Bridge**: the small server in this folder. It listens only on your
@@ -43,30 +27,76 @@ If you prefer each step by hand, read on.
 | File            | Purpose                                              |
 |-----------------|------------------------------------------------------|
 | `bridge.py`     | The bridge server and the login command.             |
+| `install.sh`    | One-shot setup. Daemon, login, harness wiring.      |
 | `identity.json` | Your login. Created by the login step. Keep secret. |
 | `bridge.log`    | Log of key mints. Contains no secrets.              |
 | `login.log`     | Record of the last login.                           |
 | `README.md`     | This file.                                          |
 
-The folder is a git repo. Only `bridge.py`, `README.md`, and
-`.gitignore` are tracked. `identity.json` and all logs stay out of
-git. Do not force-add them.
+The folder is a git repo. Only `bridge.py`, `install.sh`,
+`README.md`, and `.gitignore` are tracked. `identity.json` and all
+logs stay out of git. Do not force-add them.
 
-## Install the bridge
+---
 
-Run each step in order.
+## A. Simple installation (recommended)
+
+Run two commands. Total time is about five minutes. Most of that is
+the browser approval, which needs you. Everything else is automatic.
+
+```bash
+git clone https://github.com/jeffhuen/muse-bridge.git ~/.config/muse-bridge
+~/.config/muse-bridge/install.sh
+```
+
+With no flags the script asks which harness to wire: OpenCode, pi, or
+both. Use `--opencode` and/or `--pi` to skip the question.
+
+What the script does, in order, and what you will see:
+
+1. **Files (~10 seconds).** It copies the bridge into place. No
+   output means success.
+2. **Daemon (~10 seconds).** It registers the Mac auto-start entry
+   and starts the bridge. You see `Starting daemon`.
+3. **Login check (~5 seconds).** It asks the bridge for the model
+   list. This call is free. If your login already works, it prints
+   `Login OK` and skips to step 5.
+4. **Login, only if step 3 fails (~2 minutes, needs you).** Your
+   browser opens at the Meta approval page. Your terminal shows a
+   user code. Type the code in the browser and approve. Return to
+   the terminal and wait for `identity stored (0600). Mint works.`
+   The code expires after about 10 minutes. If it expires, run the
+   script again and approve faster.
+5. **Harness wiring (~5 seconds).** It adds the bridge entry to your
+   tool config. It backs up each file it touches first. You see
+   `updated <path> (backup kept)`.
+6. **Two in-tool steps (needs you, one minute).** The script cannot
+   click inside your tools, so finish there:
+   - OpenCode: `/connect` → `meta-bridge` → type any dummy text,
+     then `/models` → `meta-bridge/muse-spark-1.3`.
+   - pi: `/model` → `meta-bridge/muse-spark-1.3`.
+
+The script is safe to run again at any time. It skips steps that are
+already done and never duplicates config entries.
+
+---
+
+## B. Manual installation
+
+Do this only if the script does not fit your setup. Each part says
+what it is for. Do the parts in order.
+
+### B.1. Place the files and start the daemon
 
 1. Check Python:
    ```bash
    python3 --version
    ```
    You need Python 3.8 or later.
-
 2. Keep this folder where it is:
    `~/.config/muse-bridge`. The login step and the auto-start entry
-   both expect that path. If you move the folder, read
-   “Move the folder” below first.
-
+   both expect that path. If you move the folder, read “Move the
+   folder” under Maintain first.
 3. Start the bridge by hand to test it:
    ```bash
    nohup python3 ~/.config/muse-bridge/bridge.py > ~/.config/muse-bridge/bridge.log 2>&1 &
@@ -74,7 +104,6 @@ Run each step in order.
    ```
    Expected result: a 503 error that tells you to run login. That
    means the server runs but has no login yet. This is correct.
-
 4. Keep it running after reboot. The Mac entry for this is a
    LaunchAgent. The file is:
    `~/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist`.
@@ -84,10 +113,11 @@ Run each step in order.
    launchctl load ~/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist
    ```
 
-## Get the OAuth login
+### B.2. Get the OAuth login
 
 You do this one time. The login stays valid. The bridge mints fresh
-keys from it on its own.
+keys from it on its own. Allow two minutes, most of it waiting on
+the browser.
 
 1. Start the login:
    ```bash
@@ -120,7 +150,7 @@ keys from it on its own.
 If approval takes too long, the code expires after about 10 minutes.
 Run the login command again and approve faster.
 
-## Use the bridge with OpenCode
+### B.3. Wire up OpenCode
 
 1. Open `~/.config/opencode/opencode.json`. Add this provider block:
    ```json
@@ -146,13 +176,15 @@ Run the login command again and approve faster.
      }
    }
    ```
+   The variants expose effort levels to OpenCode's switcher. There is
+   deliberately no `off` variant: Meta rejects it.
 2. In OpenCode, run `/connect`. Select `meta-bridge`. Type any dummy
    value, for example `bridge`. The bridge sets the real key itself.
    Your dummy value is ignored.
 3. Run `/models`. Select `meta-bridge/muse-spark-1.3`.
 4. Send a test message. Expected result: a normal answer.
 
-## Use the bridge with pi
+### B.4. Wire up pi
 
 1. Open `~/.pi/agent/models.json`. Add this provider:
    ```json
@@ -176,11 +208,11 @@ Run the login command again and approve faster.
 3. Pick the thinking level in pi as usual. The bridge forwards the
    level to Meta untouched.
 
-## Use the bridge with anything else
+### B.5. Wire up anything else
 
 Any tool that accepts a custom OpenAI-style server works. Set its
 server address to `http://127.0.0.1:8915/v1` and its key to any dummy
-text. Example with curl (replace `MODEL` as needed):
+text. Example with curl:
 ```bash
 curl -s http://127.0.0.1:8915/v1/responses \
   -H 'Content-Type: application/json' \
@@ -189,10 +221,13 @@ curl -s http://127.0.0.1:8915/v1/responses \
 Note: this call spends a small number of tokens. The `/models` call
 above is free. Use `/models` for connection checks.
 
+---
+
 ## Maintain the bridge
 
 - **Read the log.** Run `tail -f ~/.config/muse-bridge/bridge.log`.
-  Normal lines say `minted key via identity.json`. No line ever
+  Normal lines say `minted key via identity.json`. Upstream failures
+  show as `upstream <method> <path> -> <status>`. No line ever
   contains a key.
 - **Restart it.** Run:
   ```bash
@@ -218,6 +253,7 @@ above is free. Use `/models` for connection checks.
 | `503 no usable credential; run login` | No login stored yet, or it died | Run the login step again |
 | `402 billing_not_configured` | The Meta account has no valid billing | Fix billing at `dev.meta.ai`, then retry |
 | `401` from upstream, then recovery | The minted key expired early | No action. The bridge drops it and mints a new one on the next request |
+| `upstream ... -> 429` in the log | The account rate limit is spent (often by a second tool on the same account) | Ease off the other tool, wait, retry |
 | Tool cannot reach `127.0.0.1:8915` | The bridge is not running | Check the log, then kickstart |
 | Blank `401 Authentication Error` at login mint | The approval did not grant API access | Check account access, then log in again |
 
@@ -237,10 +273,12 @@ above is free. Use `/models` for connection checks.
 Each request passes through three steps. The bridge picks a key: it
 reuses a minted key younger than 20 hours, else mints one from the
 stored login, else falls back to a static `LLM_...` key from the
-environment. It then forwards your request to
-`https://api.meta.ai/v1`, swaps in the real key, and adds
-`prompt_cache_retention: 24h` to Responses calls so prompt caching
-works. It streams the answer back as it arrives.
+environment. Upstream connections are pooled and reused across
+requests. One lock guards minting so concurrent requests never mint
+twice. It then forwards your request to `https://api.meta.ai/v1`,
+swaps in the real key, and adds `prompt_cache_retention: 24h` to
+Responses calls so prompt caching works. It streams the answer back
+as it arrives.
 
 ## Credits and inspiration
 
