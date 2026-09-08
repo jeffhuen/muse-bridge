@@ -3,6 +3,7 @@ package rewrite
 import (
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -54,5 +55,13 @@ func TestResponsesInvalidJSONPassthrough(t *testing.T) {
 	in := []byte(`{not json`)
 	if out := Responses(in, false); string(out) != string(in) {
 		t.Fatalf("invalid JSON not passed through: %q", out)
+	}
+}
+
+func TestResponsesPreservesBigIntegers(t *testing.T) {
+	const big = "9223372036854775807" // 2^63-1: unrepresentable as float64
+	out := Responses([]byte(`{"model":"m","seed":`+big+`}`), false)
+	if !strings.Contains(string(out), `"seed":`+big) {
+		t.Fatalf("seed mangled: %s", out)
 	}
 }

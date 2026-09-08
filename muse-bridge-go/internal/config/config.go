@@ -29,13 +29,19 @@ const (
 var (
 	// Durations are vars so long-lived processes could reload them;
 	// nothing today mutates them outside tests.
-	KeyTTL          = 20 * time.Hour
-	UpstreamTimeout = 300 * time.Second
-	AuthTimeout     = 30 * time.Second
-	SemaphoreWait   = 60 * time.Second
-	ReadHeaderTime  = 30 * time.Second
-	IdleTime        = 120 * time.Second
-	ShutdownTime    = 30 * time.Second
+	KeyTTL = 20 * time.Hour
+	// UpstreamHeaderTimeout bounds time-to-first-byte only. Stream
+	// bodies are unbounded by design: a wall clock there would kill
+	// legitimate long generations.
+	UpstreamHeaderTimeout = 300 * time.Second
+	AuthTimeout           = 30 * time.Second
+	SemaphoreWait         = 60 * time.Second
+	ReadHeaderTime        = 30 * time.Second
+	IdleTime              = 120 * time.Second
+	ShutdownTime          = 30 * time.Second
+	// IdleConnTTL caps pooled upstream keep-alive reuse, matching
+	// bridge.py's pool.
+	IdleConnTTL = 60 * time.Second
 )
 
 // ConfigBase returns $XDG_CONFIG_HOME or ~/.config.

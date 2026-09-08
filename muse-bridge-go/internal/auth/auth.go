@@ -62,7 +62,11 @@ func LoadDirectKeys() []DirectKey {
 	}
 	data, err := os.ReadFile(config.MuseAuthPath())
 	if err != nil {
-		log.Println("muse auth not readable:", err)
+		// Absent file is the normal case (no Muse app installed);
+		// only unexpected failures deserve a log line.
+		if !os.IsNotExist(err) {
+			log.Println("muse auth not readable:", err)
+		}
 		return keys
 	}
 	var doc any
@@ -135,13 +139,32 @@ func MintAPIKey(client *http.Client, identity string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("mint unreachable: %w", err)
 	}
-	defer resp.Body.Close()
-	body := decodeJSON(resp.Body)
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	var body map[string]any
+	_ = json.Unmarshal(raw, &body)
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("mint HTTP %d: %s", resp.StatusCode, ShortJSON(body))
+		return "", fmt.Errorf("mint HTTP %d: %s", resp.StatusCode, errorDetail(body, raw))
 	}
 	key, _ := body["api_key"].(string)
 	return key, nil
+}
+
+// errorDetail renders a mint failure: structured JSON when the body
+// parsed, else a truncated snippet of the raw bytes (an HTML ingress
+// page must not collapse to "{}").
+func errorDetail(body map[string]any, raw []byte) string {
+	if len(body) > 0 {
+		return ShortJSON(body)
+	}
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 500 {
+		s = s[:500]
+	}
+	if s == "" {
+		return "{}"
+	}
+	return s
 }
 
 func decodeJSON(r io.Reader) map[string]any {

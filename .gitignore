@@ -6,3 +6,5 @@ __pycache__/
 muse-bridge-go/dist/
 muse-bridge-go/muse-bridge-go
 muse-bridge-go/muse-bridge-go.exe
+bin/
+bridge-go.log

@@ -3,9 +3,19 @@
 package rewrite
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 )
+
+// Decode unmarshals JSON while preserving number literals exactly.
+// Plain json.Unmarshal decodes every number as float64, corrupting
+// integers above 2^53 (seeds, IDs); UseNumber keeps them verbatim.
+func Decode(data []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
 
 // Responses defaults prompt_cache_retention to 24h and drops reasoning
 // blocks Meta rejects (missing, null, or "none" effort). Invalid JSON
@@ -13,7 +23,7 @@ import (
 // model and original reasoning are logged.
 func Responses(body []byte, debug bool) []byte {
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
+	if err := Decode(body, &payload); err != nil {
 		return body
 	}
 	if _, ok := payload["prompt_cache_retention"]; !ok {

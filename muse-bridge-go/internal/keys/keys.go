@@ -16,7 +16,10 @@ import (
 // network or credentials.
 type Provider interface {
 	CurrentKey() (string, error)
-	Invalidate()
+	// Invalidate drops the cached key, but only if it is still the one
+	// that failed: concurrent 401s for an already-rotated key must not
+	// trigger cascading re-mints.
+	Invalidate(failedKey string)
 }
 
 // Store mints via the stored identity, falling back to static direct
@@ -51,12 +54,15 @@ func (s *Store) CurrentKey() (string, error) {
 	return key, nil
 }
 
-// Invalidate drops the cached key so the next call re-resolves.
-// Callers use this after an upstream 401.
-func (s *Store) Invalidate() {
+// Invalidate drops the cached key so the next call re-resolves, but
+// only when the cache still holds the key that failed. Callers use
+// this after an upstream 401.
+func (s *Store) Invalidate(failedKey string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.key = ""
+	if s.key == failedKey {
+		s.key = ""
+	}
 }
 
 func (s *Store) resolve() (string, error) {

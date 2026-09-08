@@ -71,7 +71,9 @@ git clone https://github.com/jeffhuen/muse-bridge.git ~/.config/muse-bridge
 ```
 
 With no flags the script asks which harness to wire: OpenCode, pi, or
-both. Use `--opencode` and/or `--pi` to skip the question.
+both. Use `--opencode` and/or `--pi` to skip the question. The daemon
+defaults to Python; add `--go` to also install the Go sidecar on port
+8916, or `--go-only` for the Go daemon instead of the Python one.
 
 What the script does, in order, and what you will see:
 
@@ -311,7 +313,8 @@ above is free. Use `/models` for connection checks.
 `muse-bridge-go/` is a Go implementation of the same daemon: one static
 binary per platform, standard library only, sharing the same
 `identity.json` and logs. Either daemon can serve the bridge home. See
-`muse-bridge-go/README.md` for layout, build matrix, and parity notes.
+`muse-bridge-go/README.md` for layout, build matrix, persistent install,
+and parity notes.
 The Python daemon above remains the default; the Go port is where
 cross-platform work happens.
 

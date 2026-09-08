@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,8 +13,8 @@ import (
 
 // DoLogin runs the one-time Meta device flow, verifies the login by
 // minting a key, and stores the identity mode 0600. It blocks until the
-// user approves in the browser or the device code expires.
-func DoLogin(client *http.Client) error {
+// user approves in the browser, the device code expires, or ctx cancels.
+func DoLogin(ctx context.Context, client *http.Client) error {
 	status, auth := PostForm(client, config.DeviceAuthURL, map[string]string{"client_id": config.ClientID})
 	deviceCode, _ := auth["device_code"].(string)
 	userCode, _ := auth["user_code"].(string)
@@ -37,7 +38,13 @@ func DoLogin(client *http.Client) error {
 	deadline := time.Now().Add(time.Duration(expires) * time.Second)
 	identity := ""
 	for time.Now().Before(deadline) {
-		time.Sleep(time.Duration(interval) * time.Second)
+		timer := time.NewTimer(time.Duration(interval * float64(time.Second)))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return fmt.Errorf("login interrupted: %w", ctx.Err())
+		case <-timer.C:
+		}
 		status, tok := PostForm(client, config.DeviceTokenURL, map[string]string{
 			"grant_type":  config.DeviceGrant,
 			"device_code": deviceCode,

@@ -35,10 +35,16 @@ func (s *stubKeys) CurrentKey() (string, error) {
 	return s.keys[i], nil
 }
 
-func (s *stubKeys) Invalidate() {
+func (s *stubKeys) Invalidate(failed string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.invalidated++
+	i := s.invalidated
+	if i >= len(s.keys) {
+		i = len(s.keys) - 1
+	}
+	if s.keys[i] == failed {
+		s.invalidated++
+	}
 }
 
 // setup wires a Handler in front of a stub upstream.
@@ -203,6 +209,85 @@ func TestNonJSONUpstreamError(t *testing.T) {
 	rec := do(t, h, "GET", "/v1/models", "", "")
 	if rec.Code != 502 || !strings.Contains(rec.Body.String(), "upstream HTTP 502") {
 		t.Fatalf("code=%d body=%q", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "proxy woe") {
+		t.Fatalf("diagnostic snippet dropped: %q", rec.Body.String())
+	}
+}
+
+func TestRewritesBareResponsesPath(t *testing.T) {
+	k := &stubKeys{keys: []string{"LLM_test"}}
+	var gotPath, gotBody string
+	h := setup(t, k, func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		w.Write([]byte(`{}`))
+	})
+	rec := do(t, h, "POST", "/responses", "application/json", `{"reasoning":{"effort":"none"}}`)
+	if rec.Code != 200 {
+		t.Fatalf("code=%d", rec.Code)
+	}
+	if gotPath != "/v1/responses" {
+		t.Fatalf("path=%q, want /v1/responses", gotPath)
+	}
+	if !strings.Contains(gotBody, `"prompt_cache_retention":"24h"`) {
+		t.Fatalf("retention missing: %s", gotBody)
+	}
+	if strings.Contains(gotBody, "reasoning") {
+		t.Fatalf("reasoning not stripped: %s", gotBody)
+	}
+}
+
+func TestForwardsRateLimitHeaders(t *testing.T) {
+	k := &stubKeys{keys: []string{"LLM_test"}}
+	h := setup(t, k, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "120")
+		w.Header().Set("X-Request-Id", "req-1")
+		w.WriteHeader(429)
+		w.Write([]byte(`{"error":"slow down"}`))
+	})
+	rec := do(t, h, "GET", "/v1/models", "", "")
+	if rec.Code != 429 {
+		t.Fatalf("code=%d, want 429", rec.Code)
+	}
+	if got := rec.Header().Get("Retry-After"); got != "120" {
+		t.Fatalf("Retry-After=%q, want 120", got)
+	}
+	if got := rec.Header().Get("X-Request-Id"); got != "req-1" {
+		t.Fatalf("X-Request-Id=%q, want req-1", got)
+	}
+}
+
+func TestSuccessForwardsRequestID(t *testing.T) {
+	k := &stubKeys{keys: []string{"LLM_test"}}
+	h := setup(t, k, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Request-Id", "req-2")
+		w.Write([]byte(`{}`))
+	})
+	rec := do(t, h, "GET", "/v1/models", "", "")
+	if got := rec.Header().Get("X-Request-Id"); got != "req-2" {
+		t.Fatalf("X-Request-Id=%q, want req-2", got)
+	}
+}
+
+func TestUpstreamClientTransport(t *testing.T) {
+	c := NewUpstreamClient(8)
+	if c.Timeout != 0 {
+		t.Fatalf("Client.Timeout=%v, want 0 (no wall clock on streams)", c.Timeout)
+	}
+	tr, ok := c.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("transport is %T, want *http.Transport", c.Transport)
+	}
+	if tr.MaxIdleConnsPerHost != 8 {
+		t.Fatalf("MaxIdleConnsPerHost=%d, want 8", tr.MaxIdleConnsPerHost)
+	}
+	if !tr.DisableCompression {
+		t.Fatal("DisableCompression=false, want true")
+	}
+	if tr.ResponseHeaderTimeout != config.UpstreamHeaderTimeout {
+		t.Fatalf("ResponseHeaderTimeout=%v", tr.ResponseHeaderTimeout)
 	}
 }
 

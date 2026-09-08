@@ -216,6 +216,8 @@ def load_direct_keys():
         walk(data.get("providers", data) if isinstance(data, dict) else data)
         for item in dict.fromkeys(found):
             keys.append(("muse-auth.json", item))
+    except FileNotFoundError:
+        pass  # normal: no Muse app installed
     except Exception as exc:
         print("muse auth not readable: %s" % exc, flush=True)
     return keys
@@ -253,16 +255,25 @@ def current_key():
         return key
 
 
-def invalidate_key():
+def invalidate_key(expected):
+    """Drop the cached key, but only if it is still the one that failed.
+
+    Concurrent 401s for an already-rotated key must not trigger
+    cascading re-mints."""
     with _key_lock:
-        _state["key"] = None
+        if _state["key"] == expected:
+            _state["key"] = None
+
+
+FWD_HEADERS = ("Retry-After", "X-Request-Id", "X-Ratelimit-Remaining")
 
 
 def _exchange(method, path, headers, body):
-    """One upstream round trip. Returns (kind, status, payload, conn).
+    """One upstream round trip. Returns (kind, status, payload, fwd, conn).
 
-    kind is 'error' with payload=bytes, or 'stream' with
-    payload=response object and conn checked out until closed.
+    kind is 'error' with payload=bytes and fwd=dict of forwarded
+    upstream metadata headers, or 'stream' with payload=response
+    object, fwd=None, and conn checked out until closed.
     Retries once on a dead pooled connection (safe: buffered body)."""
     for attempt in range(2):
         conn = _pool_take()
@@ -276,9 +287,14 @@ def _exchange(method, path, headers, body):
             continue
         if resp.status >= 400:
             data = resp.read(1024 * 1024 + 1)
+            fwd = {}
+            for name in FWD_HEADERS:
+                val = resp.getheader(name)
+                if val:
+                    fwd[name] = val
             _pool_give(conn)
-            return ("error", resp.status, data, None)
-        return ("stream", resp.status, resp, conn)
+            return ("error", resp.status, data, fwd, None)
+        return ("stream", resp.status, resp, None, conn)
     raise RuntimeError("unreachable")
 
 
@@ -332,7 +348,13 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self._send_json(413, {"error": "request body exceeds bridge limit"})
             return
-        if self.path.startswith("/v1/responses") and body:
+        # Normalize before the rewrite check so bare paths (e.g. /responses
+        # without the /v1 prefix) get the same munging as prefixed ones.
+        if self.path.startswith("/v1"):
+            upstream_path = self.path
+        else:
+            upstream_path = "/v1" + self.path
+        if upstream_path.startswith("/v1/responses") and body:
             try:
                 payload = json.loads(body)
                 payload.setdefault("prompt_cache_retention", "24h")
@@ -349,10 +371,6 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._send_json(503, {"error": str(exc)})
             return
-        if self.path.startswith("/v1"):
-            upstream_path = self.path
-        else:
-            upstream_path = "/v1" + self.path
         headers = {"Accept": "application/json", "Authorization": "Bearer " + key}
         if body:
             headers["Content-Type"] = self.headers.get("Content-Type", "application/json")
@@ -370,13 +388,13 @@ class Handler(BaseHTTPRequestHandler):
         """Returns (code, obj) for JSON errors, else streams and returns None."""
         for attempt in range(2):
             try:
-                kind, status, payload, conn = _exchange(self.command, upstream_path, headers, body)
+                kind, status, payload, fwd, conn = _exchange(self.command, upstream_path, headers, body)
             except Exception as exc:
                 return 502, {"error": "upstream unreachable: %s" % exc}
             if kind == "error":
                 print("upstream %s %s -> %s" % (self.command, upstream_path, status), flush=True)
                 if status == 401:
-                    invalidate_key()
+                    invalidate_key(key)
                     if attempt == 0:
                         try:
                             key = current_key()
@@ -388,7 +406,12 @@ class Handler(BaseHTTPRequestHandler):
                     obj = json.loads(payload.decode() or "{}")
                 except Exception:
                     obj = {"error": "upstream HTTP %s" % status}
+                    snippet = payload.decode("utf-8", "replace").strip()[:500]
+                    if snippet:
+                        obj["body"] = snippet
                 self.send_response(status)
+                for name, val in fwd.items():
+                    self.send_header(name, val)
                 raw = json.dumps(obj).encode()
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
@@ -398,6 +421,10 @@ class Handler(BaseHTTPRequestHandler):
             resp, conn = payload, conn
             self.send_response(status)
             self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
+            for name in FWD_HEADERS:
+                val = resp.getheader(name)
+                if val:
+                    self.send_header(name, val)
             self.close_connection = True
             self.end_headers()
             clean = False

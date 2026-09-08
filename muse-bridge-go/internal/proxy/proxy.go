@@ -10,14 +10,50 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/config"
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/keys"
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/rewrite"
 )
+
+// forwardedHeaders pass upstream metadata that clients need for backoff
+// (Retry-After) and tracing. Everything else stays dropped, as before.
+var forwardedHeaders = []string{"Retry-After", "X-Request-Id", "X-Ratelimit-Remaining"}
+
+// streamBufs recycles copy buffers so each stream does not allocate 64KB.
+var streamBufs = sync.Pool{New: func() any {
+	buf := make([]byte, config.StreamChunk)
+	return &buf
+}}
+
+// NewUpstreamClient builds the shared upstream client. There is
+// deliberately no Client.Timeout: it is a wall clock over the whole
+// body read and would abort legitimate long generations. Stream
+// lifetime is governed by the caller's context instead; the transport
+// still bounds time-to-first-byte and handshake phases.
+func NewUpstreamClient(maxFlights int) *http.Client {
+	if maxFlights <= 0 {
+		maxFlights = config.DefaultMaxFlights
+	}
+	return &http.Client{Transport: &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		MaxIdleConns:          2 * maxFlights,
+		MaxIdleConnsPerHost:   maxFlights,
+		IdleConnTimeout:       config.IdleConnTTL,
+		ResponseHeaderTimeout: config.UpstreamHeaderTimeout,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		// Identity encoding keeps chunked streams flowing with minimum
+		// latency instead of batching them through a gzip framer.
+		DisableCompression: true,
+	}}
+}
 
 // Handler proxies one bridge API surface. The zero value is not usable;
 // construct with New.
@@ -68,7 +104,13 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request) {
 			map[string]string{"error": "request body exceeds bridge limit"})
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/v1/responses") && len(body) > 0 {
+	// Normalize before the rewrite check so bare paths (e.g. /responses
+	// without the /v1 prefix) get the same munging as prefixed ones.
+	upstreamPath := r.URL.Path
+	if !strings.HasPrefix(upstreamPath, "/v1") {
+		upstreamPath = "/v1" + upstreamPath
+	}
+	if strings.HasPrefix(upstreamPath, "/v1/responses") && len(body) > 0 {
 		body = rewrite.Responses(body, h.debug)
 	}
 
@@ -78,21 +120,22 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	upstreamPath := r.URL.Path
-	if !strings.HasPrefix(upstreamPath, "/v1") {
-		upstreamPath = "/v1" + upstreamPath
-	}
 	target := h.upstream + upstreamPath
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
 
+	timer := time.NewTimer(config.SemaphoreWait)
 	select {
 	case h.sem <- struct{}{}:
+		timer.Stop()
 		defer func() { <-h.sem }()
-	case <-time.After(config.SemaphoreWait):
+	case <-timer.C:
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "bridge busy; retry"})
 		return
+	case <-r.Context().Done():
+		timer.Stop()
+		return // Client gone; nothing left to answer.
 	}
 
 	for attempt := 0; attempt < 2; attempt++ {
@@ -107,7 +150,7 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request) {
 			errBody, _ := io.ReadAll(io.LimitReader(resp.Body, config.MaxErrorBody))
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusUnauthorized && attempt == 0 {
-				h.keys.Invalidate()
+				h.keys.Invalidate(key)
 				key, err = h.keys.CurrentKey()
 				if err != nil {
 					writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": err.Error()})
@@ -115,9 +158,14 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request) {
 				}
 				continue
 			}
+			forwardHeaders(w, resp)
 			var obj any
-			if err := json.Unmarshal(errBody, &obj); err != nil {
-				obj = map[string]string{"error": fmt.Sprintf("upstream HTTP %d", resp.StatusCode)}
+			if err := rewrite.Decode(errBody, &obj); err != nil {
+				m := map[string]string{"error": fmt.Sprintf("upstream HTTP %d", resp.StatusCode)}
+				if s := snippet(errBody); s != "" {
+					m["body"] = s
+				}
+				obj = m
 			}
 			writeJSON(w, resp.StatusCode, obj)
 			return
@@ -152,17 +200,25 @@ func (h *Handler) roundTrip(r *http.Request, target string, body []byte, key str
 }
 
 // stream copies the upstream body to the client, flushing each chunk so
-// long generations arrive incrementally. A client write failure ends the
-// copy and closes the upstream body, releasing its connection.
+// long generations arrive incrementally. Headers flush first so the
+// client sees the response line even during a long reasoning phase with
+// no body bytes yet. A client write failure ends the copy and closes
+// the upstream body, releasing its connection.
 func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) {
 	ct := resp.Header.Get("Content-Type")
 	if ct == "" {
 		ct = "application/json"
 	}
 	w.Header().Set("Content-Type", ct)
+	forwardHeaders(w, resp)
 	w.WriteHeader(resp.StatusCode)
 	flusher, _ := w.(http.Flusher)
-	buf := make([]byte, config.StreamChunk)
+	if flusher != nil {
+		flusher.Flush()
+	}
+	bufPtr := streamBufs.Get().(*[]byte)
+	defer streamBufs.Put(bufPtr)
+	buf := *bufPtr
 	for {
 		n, readErr := resp.Body.Read(buf)
 		if n > 0 {
@@ -178,6 +234,24 @@ func (h *Handler) stream(w http.ResponseWriter, resp *http.Response) {
 		}
 	}
 	resp.Body.Close()
+}
+
+// forwardHeaders copies the allowlisted upstream metadata headers.
+func forwardHeaders(w http.ResponseWriter, resp *http.Response) {
+	for _, name := range forwardedHeaders {
+		if v := resp.Header.Get(name); v != "" {
+			w.Header().Set(name, v)
+		}
+	}
+}
+
+// snippet renders raw bytes for error strings, capped at 500 bytes.
+func snippet(raw []byte) string {
+	s := strings.TrimSpace(string(raw))
+	if len(s) > 500 {
+		s = s[:500]
+	}
+	return s
 }
 
 func writeJSON(w http.ResponseWriter, code int, obj any) {

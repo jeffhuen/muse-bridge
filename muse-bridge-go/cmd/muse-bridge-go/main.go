@@ -38,10 +38,19 @@ func main() {
 	}
 }
 
+// interruptContext cancels on Ctrl-C / SIGTERM. Both names compile on
+// every GOOS (verified by package.sh); where a signal never arrives
+// (Windows services) the context simply never cancels.
+func interruptContext() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+}
+
 func run() error {
+	authClient := &http.Client{Timeout: config.AuthTimeout}
 	if len(os.Args) > 1 && os.Args[1] == "login" {
-		client := &http.Client{Timeout: config.AuthTimeout}
-		return auth.DoLogin(client)
+		ctx, stop := interruptContext()
+		defer stop()
+		return auth.DoLogin(ctx, authClient)
 	}
 	port := flag.Int("port", config.DefaultPort, "localhost port to listen on")
 	maxFlights := flag.Int("max-flights", config.DefaultMaxFlights, "max concurrent upstream requests")
@@ -52,11 +61,9 @@ func run() error {
 		return nil
 	}
 
-	upstreamClient := &http.Client{Timeout: config.UpstreamTimeout} // keep-alives on by default
-	authClient := &http.Client{Timeout: config.AuthTimeout}
 	handler := proxy.New(
 		keys.NewStore(authClient, config.KeyTTL),
-		upstreamClient,
+		proxy.NewUpstreamClient(*maxFlights),
 		config.UpstreamBase,
 		*maxFlights,
 		config.DebugOn(),
@@ -76,19 +83,30 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
-	// os.Interrupt arrives as Ctrl-C / SIGINT everywhere including
-	// Windows; SIGTERM covers launchd/systemd stops on Unix. Both names
-	// compile on every GOOS (verified by package.sh).
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), config.ShutdownTime)
-		defer cancel()
-		srv.Shutdown(shutdown)
-	}()
+	// Serve runs in the background so main can block on the signal and
+	// drive Shutdown synchronously: calling Shutdown from a goroutine
+	// would close the listener, return Serve early, and exit main
+	// before in-flight streams drain.
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve(ln) }()
 	log.Printf("muse-bridge-go %s listening on 127.0.0.1:%d", version, *port)
-	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+
+	ctx, stop := interruptContext()
+	defer stop()
+	select {
+	case err := <-serveErr:
+		if err != nil && err != http.ErrServerClosed {
+			return fmt.Errorf("serve: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+	}
+	shutdown, cancel := context.WithTimeout(context.Background(), config.ShutdownTime)
+	defer cancel()
+	if err := srv.Shutdown(shutdown); err != nil {
+		return fmt.Errorf("shutdown: %w", err)
+	}
+	if err := <-serveErr; err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("serve: %w", err)
 	}
 	return nil

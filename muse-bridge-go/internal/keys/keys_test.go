@@ -95,9 +95,36 @@ func TestInvalidateForcesRefetch(t *testing.T) {
 	if _, err := s.CurrentKey(); err != nil {
 		t.Fatalf("CurrentKey: %v", err)
 	}
-	s.Invalidate()
+	s.Invalidate("LLM_one")
 	if _, err := s.CurrentKey(); err != nil {
 		t.Fatalf("CurrentKey after invalidate: %v", err)
+	}
+	if n := hits.Load(); n != 2 {
+		t.Fatalf("mint hits = %d, want 2", n)
+	}
+}
+
+func TestInvalidateIgnoresStaleKey(t *testing.T) {
+	isolateEnv(t)
+	t.Setenv("MUSE_BRIDGE_IDENTITY", "test-identity-long-enough-to-count")
+	client, hits := mintStub(t, 200, `{"api_key":"LLM_one"}`)
+
+	s := NewStore(client, time.Hour)
+	key, err := s.CurrentKey()
+	if err != nil {
+		t.Fatalf("CurrentKey: %v", err)
+	}
+	// A 401 for an already-rotated key must not evict the good one.
+	s.Invalidate("LLM_stale")
+	if got, err := s.CurrentKey(); err != nil || got != key {
+		t.Fatalf("key=%q err=%v after stale invalidate", got, err)
+	}
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("mint hits = %d, want 1 (no re-mint)", n)
+	}
+	s.Invalidate(key)
+	if _, err := s.CurrentKey(); err != nil {
+		t.Fatalf("CurrentKey after matching invalidate: %v", err)
 	}
 	if n := hits.Load(); n != 2 {
 		t.Fatalf("mint hits = %d, want 2", n)
