@@ -31,8 +31,9 @@ go build -o /tmp/muse-bridge-go ./cmd/muse-bridge-go
 ./package.sh v1.2.3        # dist/ binaries for all platforms, version-stamped
 ```
 
-`login` runs the same device flow as `bridge.py login` and writes the
-same `identity.json`, so logging in from either daemon authorizes both.
+`login` runs the same device flow as `muse-bridge-py/bridge.py login`
+and writes the same `identity.json`, so logging in from either daemon
+authorizes both.
 
 ## Persistent install (side-by-side with the Python daemon)
 
@@ -68,10 +69,9 @@ mint their own keys.
        <true/>
        <key>ThrottleInterval</key>
        <integer>10</integer>
-       <key>StandardOutPath</key>
-       <string>/Users/jeffhuen/.config/muse-bridge/bridge-go.log</string>
-       <key>StandardErrorPath</key>
-       <string>/Users/jeffhuen/.config/muse-bridge/bridge-go.log</string>
+       <!-- No StandardOutPath: the daemon appends to bridge-go.log
+            itself with rotation; a second launchd-owned fd would
+            corrupt the file. -->
    </dict>
    ```
 
@@ -91,12 +91,12 @@ mint their own keys.
    ExecStart=%h/.config/muse-bridge/bin/muse-bridge-go -port 8916
    Restart=always
    RestartSec=10
-   StandardOutput=append:%h/.config/muse-bridge/bridge-go.log
-   StandardError=append:%h/.config/muse-bridge/bridge-go.log
 
    [Install]
    WantedBy=default.target
    ```
+
+   No `StandardOutput`: same reason — the daemon owns its log file.
 
    ```bash
    systemctl --user daemon-reload
@@ -138,7 +138,7 @@ launchctl kickstart -k gui/$(id -u)/com.jeffhuen.muse-bridge-go
 
 Portability notes:
 
-- Paths mirror `bridge.py` exactly (`$XDG_CONFIG_HOME` or `~/.config`,
+- Paths mirror `muse-bridge-py/bridge.py` exactly (`$XDG_CONFIG_HOME` or `~/.config`,
   via `os.UserHomeDir`), so both daemons share one bridge home on every
   OS. `MUSE_BRIDGE_DIR` overrides the location outright.
 - Signal handling (`os.Interrupt` + `SIGTERM`) compiles on all six
@@ -150,7 +150,7 @@ Portability notes:
   Persistence on Windows is Task Scheduler or NSSM (no service wrapper
   is bundled yet).
 
-## Parity with bridge.py (and deliberate divergences)
+## Parity with muse-bridge-py (and deliberate divergences)
 
 Ported one-to-one: device login, mint + 20h cache, direct-key fallback,
 conditional 401 invalidate-and-retry-once, `/v1` path prefixing with
@@ -161,7 +161,7 @@ passthrough with snippets, `Retry-After` forwarding, chunked streaming.
 Divergences, all intentional:
 
 - `GET /healthz` answers locally (`{"status":"ok"}`) without touching
-  keys or network. bridge.py would forward the path upstream.
+  keys or network. The Python bridge would forward the path upstream.
 - Log lines carry timestamps (`log.LstdFlags | log.Lmicroseconds`).
 - Upstream requests bind to the client connection's context: a harness
   disconnect cancels the in-flight upstream fetch. Python lets it run.

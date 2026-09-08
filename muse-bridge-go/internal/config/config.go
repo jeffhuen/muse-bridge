@@ -24,6 +24,10 @@ const (
 	MaxBody           = 25 * 1024 * 1024
 	MaxErrorBody      = 1024*1024 + 1
 	StreamChunk       = 64 * 1024
+	// Log rotation matches muse-bridge-py: 64KB active file plus two
+	// numbered backups (bridge-go.log.1, .2).
+	LogMaxBytes = 64 * 1024
+	LogBackups  = 2
 )
 
 var (

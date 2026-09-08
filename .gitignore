@@ -1,6 +1,7 @@
 identity.json
 debug
 *.log
+*.log.*
 __pycache__/
 .DS_Store
 muse-bridge-go/dist/

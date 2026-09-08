@@ -20,11 +20,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/auth"
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/config"
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/keys"
+	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/logfile"
 	"github.com/jeffhuen/muse-bridge/muse-bridge-go/internal/proxy"
 )
 
@@ -60,6 +62,17 @@ func run() error {
 		fmt.Println(version)
 		return nil
 	}
+
+	// Daemon logs go to a self-rotating file. Launchers must not
+	// redirect stdout here or the two writers will corrupt it. The
+	// login path above keeps the default stderr output.
+	lf, err := logfile.Open(
+		filepath.Join(config.BaseDir(), "bridge-go.log"),
+		config.LogMaxBytes, config.LogBackups)
+	if err != nil {
+		return fmt.Errorf("open log: %w", err)
+	}
+	log.SetOutput(lf)
 
 	handler := proxy.New(
 		keys.NewStore(authClient, config.KeyTTL),

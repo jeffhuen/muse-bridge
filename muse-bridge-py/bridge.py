@@ -10,6 +10,7 @@ No secrets are logged.
 """
 import http.client
 import json
+import logging
 import os
 import sys
 import threading
@@ -18,6 +19,7 @@ import urllib.parse
 import urllib.request
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 
 UPSTREAM = "https://api.meta.ai/v1"
 UPSTREAM_HOST = "api.meta.ai"
@@ -35,6 +37,8 @@ MAX_IDLE_CONNS = 16
 IDLE_CONN_TTL = 60
 MAX_UPSTREAM_FLIGHTS = 64
 SOCKET_TIMEOUT = 300
+LOG_MAX_BYTES = 64 * 1024
+LOG_BACKUPS = 2
 
 # --- shared upstream connection pool (keep-alive across threads) ---
 
@@ -79,6 +83,21 @@ def _pool_drop(conn):
 _state = {"key": None, "at": 0.0}
 _key_lock = threading.Lock()
 _upstream_sem = threading.BoundedSemaphore(MAX_UPSTREAM_FLIGHTS)
+
+log = logging.getLogger("bridge")
+
+
+def _setup_logging():
+    """File logging with rotation. Daemon mode only: the login flow keeps
+    printing to the terminal. Launchers must not redirect stdout to this
+    file or the two writers will corrupt it."""
+    handler = RotatingFileHandler(
+        os.path.join(base_dir(), "bridge.log"),
+        maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS)
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s.%(msecs)03d %(message)s", "%Y/%m/%d %H:%M:%S"))
+    log.addHandler(handler)
+    log.setLevel(logging.INFO)
 
 
 def base_dir():
@@ -219,7 +238,7 @@ def load_direct_keys():
     except FileNotFoundError:
         pass  # normal: no Muse app installed
     except Exception as exc:
-        print("muse auth not readable: %s" % exc, flush=True)
+        log.warning("muse auth not readable: %s", exc)
     return keys
 
 
@@ -229,14 +248,14 @@ def _resolve_key():
         try:
             key, _ = mint_api_key(ident)
         except Exception as exc:
-            print("mint via %s failed: %s" % (src, exc), flush=True)
+            log.warning("mint via %s failed: %s", src, exc)
         else:
             if key:
-                print("minted key via %s" % src, flush=True)
+                log.info("minted key via %s", src)
                 return key
-            print("mint via %s returned no key" % src, flush=True)
+            log.warning("mint via %s returned no key", src)
     for var, val in load_direct_keys():
-        print("using direct key from %s" % var, flush=True)
+        log.info("using direct key from %s", var)
         return val
     raise RuntimeError("no usable credential; run `python3 bridge.py login` once")
 
@@ -249,7 +268,7 @@ def current_key():
         fresh = _state["key"]
         if fresh and time.time() - _state["at"] < KEY_TTL:
             return fresh
-        print("resolving key", flush=True)
+        log.info("resolving key")
         key = _resolve_key()
         _state.update(key=key, at=time.time())
         return key
@@ -359,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(body)
                 payload.setdefault("prompt_cache_retention", "24h")
                 if _debug_on():
-                    print("req model=%s reasoning=%s" % (payload.get("model"), payload.get("reasoning")), flush=True)
+                    log.info("req model=%s reasoning=%s", payload.get("model"), payload.get("reasoning"))
                 reasoning = payload.get("reasoning")
                 if isinstance(reasoning, dict) and reasoning.get("effort") in (None, "none"):
                     payload.pop("reasoning", None)
@@ -392,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 return 502, {"error": "upstream unreachable: %s" % exc}
             if kind == "error":
-                print("upstream %s %s -> %s" % (self.command, upstream_path, status), flush=True)
+                log.warning("upstream %s %s -> %s", self.command, upstream_path, status)
                 if status == 401:
                     invalidate_key(key)
                     if attempt == 0:
@@ -462,7 +481,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "login":
         do_login()
     else:
+        _setup_logging()
         server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
         server.daemon_threads = True
-        print("muse-bridge listening on 127.0.0.1:%d" % PORT, flush=True)
+        log.info("muse-bridge listening on 127.0.0.1:%d", PORT)
         server.serve_forever()

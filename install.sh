@@ -9,6 +9,7 @@ set -euo pipefail
 
 BRIDGE_DIR="${HOME}/.config/muse-bridge"
 SRC_DIR="$(cd "$(dirname "$0")" && pwd)"
+PY_DIR="${BRIDGE_DIR}/muse-bridge-py"
 PLIST="${HOME}/Library/LaunchAgents/com.jeffhuen.muse-bridge.plist"
 PLIST_GO="${HOME}/Library/LaunchAgents/com.jeffhuen.muse-bridge-go.plist"
 BASE_URL="http://127.0.0.1:8915/v1"
@@ -67,7 +68,7 @@ if [ "$DO_UNINSTALL" -eq 1 ]; then
       "${HOME}/.config/systemd/user/muse-bridge-go.service"
     systemctl --user daemon-reload 2>/dev/null || true
   fi
-  pkill -f muse-bridge/bridge.py 2>/dev/null || true
+  pkill -f muse-bridge-py/bridge.py 2>/dev/null || true
   pkill -f muse-bridge/bin/muse-bridge-go 2>/dev/null || true
   rm -f "${PLIST}" "${PLIST_GO}"
   if [ "$DO_PURGE" -eq 1 ]; then
@@ -97,14 +98,15 @@ fi
 echo "==> Installing bridge files to ${BRIDGE_DIR}"
 mkdir -p "${BRIDGE_DIR}"
 chmod 700 "${BRIDGE_DIR}"
+mkdir -p "${PY_DIR}"
 if [ "${SRC_DIR}" != "${BRIDGE_DIR}" ]; then
-  cp "${SRC_DIR}/bridge.py" "${BRIDGE_DIR}/bridge.py"
-  cp "${SRC_DIR}/run-bridge.sh" "${BRIDGE_DIR}/run-bridge.sh"
+  cp "${SRC_DIR}/muse-bridge-py/bridge.py" "${PY_DIR}/bridge.py"
+  cp "${SRC_DIR}/muse-bridge-py/run-bridge.sh" "${PY_DIR}/run-bridge.sh"
   rm -rf "${BRIDGE_DIR}/muse-bridge-go"
   cp -r "${SRC_DIR}/muse-bridge-go" "${BRIDGE_DIR}/muse-bridge-go"
   rm -rf "${BRIDGE_DIR}/muse-bridge-go/dist"
 fi
-chmod +x "${BRIDGE_DIR}/run-bridge.sh"
+chmod +x "${PY_DIR}/run-bridge.sh"
 
 echo "==> Starting daemon"
 start_darwin() {
@@ -118,7 +120,7 @@ start_darwin() {
     <string>com.jeffhuen.muse-bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${BRIDGE_DIR}/run-bridge.sh</string>
+        <string>${PY_DIR}/run-bridge.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -126,13 +128,11 @@ start_darwin() {
     <true/>
     <key>ThrottleInterval</key>
     <integer>10</integer>
-    <key>StandardOutPath</key>
-    <string>${BRIDGE_DIR}/bridge.log</string>
-    <key>StandardErrorPath</key>
-    <string>${BRIDGE_DIR}/bridge.log</string>
 </dict>
 </plist>
 PLEOF
+  # No StandardOutPath: the daemon appends to bridge.log itself with
+  # rotation; a second launchd-owned fd would corrupt the file.
   # Unload + load (not kickstart): kickstart reuses the already-loaded job
   # definition, so it would ignore a changed plist.
   launchctl unload "${PLIST}" 2>/dev/null || true
@@ -150,11 +150,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.config/muse-bridge/run-bridge.sh
+ExecStart=%h/.config/muse-bridge/muse-bridge-py/run-bridge.sh
 Restart=always
 RestartSec=10
-StandardOutput=append:%h/.config/muse-bridge/bridge.log
-StandardError=append:%h/.config/muse-bridge/bridge.log
 
 [Install]
 WantedBy=default.target
@@ -163,8 +161,8 @@ SVCEOF
     systemctl --user enable --now muse-bridge.service
   else
     echo "No systemd user session here (plain WSL?). Starting without auto-restart."
-    pkill -f muse-bridge/bridge.py 2>/dev/null || true
-    nohup "${BRIDGE_DIR}/run-bridge.sh" > "${BRIDGE_DIR}/bridge.log" 2>&1 &
+    pkill -f muse-bridge-py/bridge.py 2>/dev/null || true
+    nohup "${PY_DIR}/run-bridge.sh" >/dev/null 2>&1 &
     echo "It will NOT survive reboot here. Re-run install.sh after restart,"
     echo "or enable systemd in WSL and re-run."
   fi
@@ -198,13 +196,11 @@ start_go_darwin() {
     <true/>
     <key>ThrottleInterval</key>
     <integer>10</integer>
-    <key>StandardOutPath</key>
-    <string>${BRIDGE_DIR}/bridge-go.log</string>
-    <key>StandardErrorPath</key>
-    <string>${BRIDGE_DIR}/bridge-go.log</string>
 </dict>
 </plist>
 PLEOF
+  # No StandardOutPath: the daemon appends to bridge-go.log itself with
+  # rotation; a second launchd-owned fd would corrupt the file.
   launchctl unload "${PLIST_GO}" 2>/dev/null || true
   sleep 1
   launchctl load "${PLIST_GO}" 2>&1 || true
@@ -223,8 +219,6 @@ Wants=network-online.target
 ExecStart=%h/.config/muse-bridge/bin/muse-bridge-go -port 8916
 Restart=always
 RestartSec=10
-StandardOutput=append:%h/.config/muse-bridge/bridge-go.log
-StandardError=append:%h/.config/muse-bridge/bridge-go.log
 
 [Install]
 WantedBy=default.target
@@ -234,7 +228,7 @@ SVCEOF
   else
     echo "No systemd user session here (plain WSL?). Starting Go daemon without auto-restart."
     pkill -f muse-bridge/bin/muse-bridge-go 2>/dev/null || true
-    nohup "${BRIDGE_DIR}/bin/muse-bridge-go" -port 8916 > "${BRIDGE_DIR}/bridge-go.log" 2>&1 &
+    nohup "${BRIDGE_DIR}/bin/muse-bridge-go" -port 8916 >/dev/null 2>&1 &
   fi
 }
 stop_python() {
@@ -243,7 +237,7 @@ stop_python() {
   else
     systemctl --user disable --now muse-bridge.service 2>/dev/null || true
   fi
-  pkill -f muse-bridge/bridge.py 2>/dev/null || true
+  pkill -f muse-bridge-py/bridge.py 2>/dev/null || true
 }
 if [ "$DO_GO_ONLY" -eq 1 ]; then
   echo "==> Stopping Python daemon (--go-only)"
@@ -264,7 +258,7 @@ if [ "$DO_GO_ONLY" -eq 1 ]; then
   LOGIN_PROG=("${BRIDGE_DIR}/bin/muse-bridge-go" login)
 else
   DAEMON_PORT=8915
-  LOGIN_PROG=(python3 "${BRIDGE_DIR}/bridge.py" login)
+  LOGIN_PROG=(python3 "${PY_DIR}/bridge.py" login)
 fi
 echo "==> Checking login"
 if [ "$(probe "$DAEMON_PORT")" = "200" ]; then

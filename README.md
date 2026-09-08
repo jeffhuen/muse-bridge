@@ -25,8 +25,8 @@ log in one time. Your tools then just work.
 
 ## Linux and WSL notes
 
-- The bridge itself (`bridge.py`) is portable: Python standard parts
-  only, no Mac-only calls.
+- The Python bridge (`muse-bridge-py/bridge.py`) is portable: Python
+  standard parts only, no Mac-only calls.
 - Persistence differs by system, and the installer picks for you. Mac
   uses a LaunchAgent. Linux with systemd uses a user service (check
   it with `systemctl --user status muse-bridge`). Plain WSL without
@@ -46,15 +46,15 @@ log in one time. Your tools then just work.
 
 | File            | Purpose                                              |
 |-----------------|------------------------------------------------------|
-| `bridge.py`     | The bridge server and the login command.             |
-| `run-bridge.sh` | Launcher the daemon calls. Picks a working python3 at each start. |
+| `muse-bridge-py/` | Python daemon: server, login command, python launcher. |
+| `muse-bridge-go/` | Go port of the same daemon. See its README.        |
 | `install.sh`    | One-shot setup. Daemon, login, harness wiring.      |
 | `identity.json` | Your login. Created by the login step. Keep secret. |
-| `bridge.log`    | Log of key mints. Contains no secrets.              |
+| `bridge.log`    | Log of key mints. Contains no secrets. Rotates at 64KB (`.1`, `.2`). |
 | `login.log`     | Record of the last login.                           |
 | `README.md`     | This file.                                          |
 
-The folder is a git repo. Only `bridge.py`, `run-bridge.sh`,
+The folder is a git repo. Only `muse-bridge-py/`, `muse-bridge-go/`,
 `install.sh`, `README.md`, and `.gitignore` are tracked.
 `identity.json` and all logs stay out of git. Do not force-add them.
 
@@ -122,9 +122,10 @@ what it is for. Do the parts in order.
    folder” under Maintain first.
 3. Start the bridge by hand to test it:
    ```bash
-   nohup ~/.config/muse-bridge/run-bridge.sh > ~/.config/muse-bridge/bridge.log 2>&1 &
+   nohup ~/.config/muse-bridge/muse-bridge-py/run-bridge.sh >/dev/null 2>&1 &
    curl -s http://127.0.0.1:8915/v1/models | head -c 300; echo
    ```
+   The daemon writes its own log to `bridge.log`; stdout stays empty.
    Expected result: a 503 error that tells you to run login. That
    means the server runs but has no login yet. This is correct.
 4. Keep it running after reboot. The Mac entry for this is a
@@ -144,7 +145,7 @@ the browser.
 
 1. Start the login:
    ```bash
-   python3 ~/.config/muse-bridge/bridge.py login
+   python3 ~/.config/muse-bridge/muse-bridge-py/bridge.py login
    ```
 2. The command prints a web address and a user code. Open the address
    in your browser. The page shows a box for the code. Type the code
@@ -253,7 +254,9 @@ above is free. Use `/models` for connection checks.
   Normal lines say `run-bridge: using ...` then
   `minted key via identity.json`. Upstream failures
   show as `upstream <method> <path> -> <status>`. No line ever
-  contains a key.
+  contains a key. The file rotates at 64KB keeping `.1` and `.2`,
+  so it never grows unbounded. Per-request `req ...` lines appear
+  only while the `debug` file exists; everything else always logs.
 - **Which python it uses.** The launcher probes for a working
   python3 (3.8+) at each start and logs its choice, so the daemon
   survives one interpreter breaking. To pin one, set
@@ -277,9 +280,9 @@ above is free. Use `/models` for connection checks.
   `meta-bridge` block from your tool configs by hand if you no
   longer want the entries.
 - **Log in again.** If requests fail with a mint error, the login has
-  died. Run `python3 ~/.config/muse-bridge/bridge.py login` again.
+  died. Run `python3 ~/.config/muse-bridge/muse-bridge-py/bridge.py login` again.
   You do not need to touch your tools.
-- **Update it.** Pull or copy the new `bridge.py`, then restart with
+- **Update it.** Pull or copy the new `muse-bridge-py/bridge.py`, then restart with
   the kickstart command above.
 - **Move the folder.** If you move it, fix two paths: the
   `ProgramArguments` entry in the LaunchAgent file and any tool
@@ -344,7 +347,7 @@ as it arrives.
 ## Limits you must know
 
 - The bridge relies on Meta login pages that Meta does not document.
-  If Meta changes them, login breaks until `bridge.py` is updated.
+  If Meta changes them, login breaks until `muse-bridge-py/bridge.py` is updated.
   Static pay-as-you-go keys still work in that case.
 - The server decides billing from the key you send. Keys you create by
   hand on the dashboard bill pay-as-you-go. Keys the bridge mints bill

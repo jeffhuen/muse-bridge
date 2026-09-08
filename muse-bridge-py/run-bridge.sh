@@ -6,7 +6,8 @@
 # Override: MUSE_BRIDGE_PYTHON=/path/to/python3 (checked first).
 set -u
 
-BRIDGE_DIR="$(cd "$(dirname "$0")" && pwd)"
+PY_DIR="$(cd "$(dirname "$0")" && pwd)" # this script lives next to bridge.py
+BRIDGE_HOME="$(dirname "$PY_DIR")"      # ...inside the bridge home
 
 is_good() { # $1 = candidate path: must execute and be 3.8+
   [ -n "${1:-}" ] && [ -x "$1" ] || return 1
@@ -32,8 +33,12 @@ for cand in "${candidates[@]}"; do
   case ":${tried}:" in *":${cand}:"*) continue ;; esac
   tried="${tried}:${cand}"
   if is_good "$cand"; then
-    echo "run-bridge: using ${cand} ($("$cand" --version 2>&1))"
-    exec "$cand" "${BRIDGE_DIR}/bridge.py"
+    line="run-bridge: using ${cand} ($("$cand" --version 2>&1))"
+    echo "$line"
+    # The daemon owns bridge.log from here on; this one pre-exec line is
+    # ours to append (single writer at this point, so no clash).
+    echo "$line" >> "${BRIDGE_HOME}/bridge.log" 2>/dev/null || true
+    exec "$cand" "${PY_DIR}/bridge.py"
   fi
 done
 
