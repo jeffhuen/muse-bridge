@@ -87,6 +87,7 @@ fi
 echo "==> Starting daemon"
 start_darwin() {
   mkdir -p "$(dirname "${PLIST}")"
+  PYBIN="$(command -v python3)"
   cat > "${PLIST}" <<PLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -96,7 +97,7 @@ start_darwin() {
     <string>com.jeffhuen.muse-bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/bin/python3</string>
+        <string>${PYBIN}</string>
         <string>${BRIDGE_DIR}/bridge.py</string>
     </array>
     <key>RunAtLoad</key>
