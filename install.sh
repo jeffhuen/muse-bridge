@@ -13,6 +13,10 @@ BASE_URL="http://127.0.0.1:8915/v1"
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 1; }; }
 need python3
 need curl
+# The installer itself runs login + config merge with PATH python3, so verify
+# it actually executes (a broken Xcode shim passes `need` but fails to run).
+python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)' 2>/dev/null \
+  || { echo "python3 on PATH is broken or older than 3.8; fix Xcode/CLT or install python3" >&2; exit 1; }
 
 OS_NAME="$(uname -s)"
 IS_WSL=0
@@ -82,12 +86,13 @@ mkdir -p "${BRIDGE_DIR}"
 chmod 700 "${BRIDGE_DIR}"
 if [ "${SRC_DIR}" != "${BRIDGE_DIR}" ]; then
   cp "${SRC_DIR}/bridge.py" "${BRIDGE_DIR}/bridge.py"
+  cp "${SRC_DIR}/run-bridge.sh" "${BRIDGE_DIR}/run-bridge.sh"
 fi
+chmod +x "${BRIDGE_DIR}/run-bridge.sh"
 
 echo "==> Starting daemon"
 start_darwin() {
   mkdir -p "$(dirname "${PLIST}")"
-  PYBIN="$(command -v python3)"
   cat > "${PLIST}" <<PLEOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -97,13 +102,14 @@ start_darwin() {
     <string>com.jeffhuen.muse-bridge</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${PYBIN}</string>
-        <string>${BRIDGE_DIR}/bridge.py</string>
+        <string>${BRIDGE_DIR}/run-bridge.sh</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
     <key>StandardOutPath</key>
     <string>${BRIDGE_DIR}/bridge.log</string>
     <key>StandardErrorPath</key>
@@ -111,11 +117,11 @@ start_darwin() {
 </dict>
 </plist>
 PLEOF
-  if launchctl list 2>/dev/null | grep -q com.jeffhuen.muse-bridge; then
-    launchctl kickstart -k "gui/$(id -u)/com.jeffhuen.muse-bridge" >/dev/null 2>&1 || true
-  else
-    launchctl load "${PLIST}" 2>&1 || true
-  fi
+  # Unload + load (not kickstart): kickstart reuses the already-loaded job
+  # definition, so it would ignore a changed plist.
+  launchctl unload "${PLIST}" 2>/dev/null || true
+  sleep 1
+  launchctl load "${PLIST}" 2>&1 || true
 }
 start_linux() {
   UNIT_DIR="${HOME}/.config/systemd/user"
@@ -128,9 +134,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/env python3 %h/.config/muse-bridge/bridge.py
+ExecStart=%h/.config/muse-bridge/run-bridge.sh
 Restart=always
-RestartSec=3
+RestartSec=10
 StandardOutput=append:%h/.config/muse-bridge/bridge.log
 StandardError=append:%h/.config/muse-bridge/bridge.log
 
@@ -142,7 +148,7 @@ SVCEOF
   else
     echo "No systemd user session here (plain WSL?). Starting without auto-restart."
     pkill -f muse-bridge/bridge.py 2>/dev/null || true
-    nohup python3 "${BRIDGE_DIR}/bridge.py" > "${BRIDGE_DIR}/bridge.log" 2>&1 &
+    nohup "${BRIDGE_DIR}/run-bridge.sh" > "${BRIDGE_DIR}/bridge.log" 2>&1 &
     echo "It will NOT survive reboot here. Re-run install.sh after restart,"
     echo "or enable systemd in WSL and re-run."
   fi

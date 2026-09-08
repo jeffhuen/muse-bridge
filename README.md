@@ -47,15 +47,16 @@ log in one time. Your tools then just work.
 | File            | Purpose                                              |
 |-----------------|------------------------------------------------------|
 | `bridge.py`     | The bridge server and the login command.             |
+| `run-bridge.sh` | Launcher the daemon calls. Picks a working python3 at each start. |
 | `install.sh`    | One-shot setup. Daemon, login, harness wiring.      |
 | `identity.json` | Your login. Created by the login step. Keep secret. |
 | `bridge.log`    | Log of key mints. Contains no secrets.              |
 | `login.log`     | Record of the last login.                           |
 | `README.md`     | This file.                                          |
 
-The folder is a git repo. Only `bridge.py`, `install.sh`,
-`README.md`, and `.gitignore` are tracked. `identity.json` and all
-logs stay out of git. Do not force-add them.
+The folder is a git repo. Only `bridge.py`, `run-bridge.sh`,
+`install.sh`, `README.md`, and `.gitignore` are tracked.
+`identity.json` and all logs stay out of git. Do not force-add them.
 
 ---
 
@@ -119,7 +120,7 @@ what it is for. Do the parts in order.
    folder” under Maintain first.
 3. Start the bridge by hand to test it:
    ```bash
-   nohup python3 ~/.config/muse-bridge/bridge.py > ~/.config/muse-bridge/bridge.log 2>&1 &
+   nohup ~/.config/muse-bridge/run-bridge.sh > ~/.config/muse-bridge/bridge.log 2>&1 &
    curl -s http://127.0.0.1:8915/v1/models | head -c 300; echo
    ```
    Expected result: a 503 error that tells you to run login. That
@@ -247,9 +248,14 @@ above is free. Use `/models` for connection checks.
 ## Maintain the bridge
 
 - **Read the log.** Run `tail -f ~/.config/muse-bridge/bridge.log`.
-  Normal lines say `minted key via identity.json`. Upstream failures
+  Normal lines say `run-bridge: using ...` then
+  `minted key via identity.json`. Upstream failures
   show as `upstream <method> <path> -> <status>`. No line ever
   contains a key.
+- **Which python it uses.** The launcher probes for a working
+  python3 (3.8+) at each start and logs its choice, so the daemon
+  survives one interpreter breaking. To pin one, set
+  `MUSE_BRIDGE_PYTHON=/path/to/python3` in the daemon environment.
 - **Restart it.** Run:
   ```bash
   launchctl kickstart -k gui/$(id -u)/com.jeffhuen.muse-bridge
@@ -286,6 +292,7 @@ above is free. Use `/models` for connection checks.
 | `401` from upstream, then recovery | The minted key expired early | No action. The bridge drops it and mints a new one on the next request |
 | `upstream ... -> 429` in the log | The account rate limit is spent (often by a second tool on the same account) | Ease off the other tool, wait, retry |
 | Tool cannot reach `127.0.0.1:8915` | The bridge is not running | Check the log, then kickstart |
+| `run-bridge: no working python3` in the log | No interpreter on the machine runs (need 3.8+) | Install Python (Homebrew on Mac) or set `MUSE_BRIDGE_PYTHON`, then kickstart |
 | Blank `401 Authentication Error` at login mint | The approval did not grant API access | Check account access, then log in again |
 
 ## Security rules
@@ -298,6 +305,15 @@ above is free. Use `/models` for connection checks.
 - Your `muse` tokens live in the macOS Keychain. This bridge keeps its
   own separate login, so `muse` and the bridge do not disturb each
   other.
+
+## Go port
+
+`muse-bridge-go/` is a Go implementation of the same daemon: one static
+binary per platform, standard library only, sharing the same
+`identity.json` and logs. Either daemon can serve the bridge home. See
+`muse-bridge-go/README.md` for layout, build matrix, and parity notes.
+The Python daemon above remains the default; the Go port is where
+cross-platform work happens.
 
 ## How it works, in short
 

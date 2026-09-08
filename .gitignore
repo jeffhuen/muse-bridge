@@ -3,3 +3,6 @@ debug
 *.log
 __pycache__/
 .DS_Store
+muse-bridge-go/dist/
+muse-bridge-go/muse-bridge-go
+muse-bridge-go/muse-bridge-go.exe
