@@ -50,7 +50,7 @@ func DecodeReasoningEncryptedContent(encrypted string) *ReasoningEncryptedState 
 
 // ConvertChatToPrediction converts an OpenAI ChatRequest into a PredictionRequest.
 func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache) (*upstream.PredictionRequest, error) {
-	if err := validateChatToolExchange(req.Messages); err != nil {
+	if err := validateChatToolExchange(req.Messages, sigCache); err != nil {
 		return nil, err
 	}
 
@@ -139,13 +139,31 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 	// Build map of call_id -> function name from assistant messages and track tool results
 	callNames := make(map[string]string)
 	hasMatchingOutputChat := make(map[string]bool)
+	callAliasChat := make(map[string]string)
 	for _, m := range req.Messages {
 		for _, tc := range m.ToolCalls {
 			if tc.ID != "" && tc.Function.Name != "" {
 				callNames[tc.ID] = tc.Function.Name
+				callAliasChat[tc.ID] = tc.ID
+				if sigCache != nil {
+					if rec, ok := sigCache.GetToolRecord(tc.ID); ok && rec != nil {
+						if rec.UpstreamID != "" {
+							callAliasChat[rec.UpstreamID] = tc.ID
+							callNames[rec.UpstreamID] = tc.Function.Name
+						}
+					}
+				}
 			}
 		}
 		if strings.ToLower(strings.TrimSpace(m.Role)) == "tool" && m.ToolCallID != "" {
+			cID := m.ToolCallID
+			if canon, ok := callAliasChat[cID]; ok {
+				hasMatchingOutputChat[canon] = true
+			} else if sigCache != nil {
+				if rec, ok := sigCache.GetToolRecord(cID); ok && rec != nil {
+					hasMatchingOutputChat[rec.BridgeCallID] = true
+				}
+			}
 			hasMatchingOutputChat[m.ToolCallID] = true
 		}
 	}
@@ -223,11 +241,22 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 						rec, _ = sigCache.GetToolRecord(tc.ID)
 					}
 					if rec != nil {
-						ev.HasCache = true
-						if (rec.ToolName != "" && rec.ToolName != tc.Function.Name) || (rec.Args != nil && !equalToolArgs(rec.Args, args)) {
-							ev.CacheMismatch = true
-						} else {
+						if !rec.IsLegacy {
+							ev.HasCache = true
 							ev.CacheSig = rec.ThoughtSignature
+							if rec.ToolName != tc.Function.Name || !equalToolArgs(rec.Args, args) {
+								ev.CacheMismatch = true
+							}
+						} else {
+							if (rec.ToolName != "" && rec.ToolName != tc.Function.Name) || (rec.Args != nil && !equalToolArgs(rec.Args, args)) {
+								if !ev.HasCarrier || ev.CarrierMismatch {
+									ev.HasCache = true
+									ev.CacheMismatch = true
+								}
+							} else {
+								ev.HasCache = true
+								ev.CacheSig = rec.ThoughtSignature
+							}
 						}
 					}
 					if ev.CarrierSig == "" && len(m.ToolCalls) == 1 {
@@ -441,12 +470,28 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 	} else {
 		var items []map[string]any
 		if err := json.Unmarshal(req.Input, &items); err == nil {
-			if err := validateResponsesToolExchange(items); err != nil {
+			if err := validateResponsesToolExchange(items, sigCache); err != nil {
 				return nil, err
 			}
 			callNames := make(map[string]string)
 			hasMatchingOutput := make(map[string]bool)
 			callAlias := make(map[string]string)
+			// Pre-scan for reasoning items carrying opaque turn state
+			type verifiedTextPart struct {
+				Text string
+				Sig  string
+			}
+			type verifiedToolPart struct {
+				Name       string
+				Args       map[string]any
+				Sig        string
+				UpstreamID string
+				BridgeID   string
+			}
+			reasoningVerifiedText := make(map[string]verifiedTextPart)
+			reasoningVerifiedTools := make(map[string]verifiedToolPart)
+			carrierSiblings := make(map[string]map[string]bool)
+
 			for _, item := range items {
 				itemType, _ := item["type"].(string)
 				if itemType == "function_call" {
@@ -481,33 +526,10 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 							callNames[itemID] = name
 						}
 					}
-				} else if itemType == "function_call_output" {
-					if cID, _ := item["call_id"].(string); cID != "" {
-						canonical := callAlias[cID]
-						if canonical == "" {
-							canonical = cID
-						}
-						hasMatchingOutput[canonical] = true
-					}
 				}
 			}
 
-			// Pre-scan for reasoning items carrying opaque turn state
-			type verifiedTextPart struct {
-				Text string
-				Sig  string
-			}
-			type verifiedToolPart struct {
-				Name       string
-				Args       map[string]any
-				Sig        string
-				UpstreamID string
-				BridgeID   string
-			}
-			reasoningVerifiedText := make(map[string]verifiedTextPart)
-			reasoningVerifiedTools := make(map[string]verifiedToolPart)
-			carrierSiblings := make(map[string]map[string]bool)
-
+			// Pre-scan reasoning carriers and map carrier UpstreamID aliases to canonical calls
 			for _, item := range items {
 				itemType, _ := item["type"].(string)
 				if itemType == "reasoning" {
@@ -536,25 +558,15 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 									if p.CallID != "" && p.OutputItemID != "" {
 										reasoningVerifiedTools[p.CallID+"_"+p.OutputItemID] = tp
 									}
-									if sigCache != nil {
-										rec := &upstream.NativeToolRecord{
-											BridgeCallID:     p.CallID,
-											OutputItemID:     p.OutputItemID,
-											UpstreamID:       p.UpstreamID,
-											ToolName:         p.ToolName,
-											Args:             p.Args,
-											ThoughtSignature: p.ThoughtSignature,
-											Model:            state.Model,
-											TurnID:           state.TurnID,
+									if p.UpstreamID != "" {
+										if _, exists := reasoningVerifiedTools[p.UpstreamID]; !exists {
+											reasoningVerifiedTools[p.UpstreamID] = tp
 										}
-										var aliases []string
-										if p.OutputItemID != "" {
-											aliases = append(aliases, p.OutputItemID)
-											if p.CallID != "" {
-												aliases = append(aliases, p.CallID+"_"+p.OutputItemID)
+										if canonical, ok := callAlias[p.CallID]; ok {
+											if _, exists := callAlias[p.UpstreamID]; !exists {
+												callAlias[p.UpstreamID] = canonical
 											}
 										}
-										sigCache.PutToolRecord(rec, aliases...)
 									}
 								}
 							}
@@ -565,11 +577,34 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 								for _, s := range sibs {
 									carrierSiblings[lead][s] = true
 								}
-								if sigCache != nil {
-									sigCache.RecordTurnSiblings(lead, sibs)
-								}
 							}
 						}
+					}
+				}
+			}
+
+			// Resolve cache aliases for callers replaying without carrier
+			if sigCache != nil {
+				for _, item := range items {
+					if cID, _ := item["call_id"].(string); cID != "" && callAlias[cID] == "" {
+						if rec, ok := sigCache.GetToolRecord(cID); ok && rec != nil {
+							if canonical, ok := callAlias[rec.BridgeCallID]; ok {
+								callAlias[cID] = canonical
+							}
+						}
+					}
+				}
+			}
+
+			// Map matching outputs using fully resolved callAlias
+			for _, item := range items {
+				if itemType, _ := item["type"].(string); itemType == "function_call_output" {
+					if cID, _ := item["call_id"].(string); cID != "" {
+						canonical := callAlias[cID]
+						if canonical == "" {
+							canonical = cID
+						}
+						hasMatchingOutput[canonical] = true
 					}
 				}
 			}
@@ -593,6 +628,26 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 						vtp = &p
 					}
 				}
+				// Check non-legacy native cache first: authoritative record cannot be overridden by carrier
+				if sigCache != nil {
+					var rec *upstream.NativeToolRecord
+					if cID != "" {
+						rec, _ = sigCache.GetToolRecord(cID)
+					}
+					if rec == nil && itID != "" {
+						rec, _ = sigCache.GetToolRecord(itID)
+					}
+					if rec == nil && cID != "" && itID != "" {
+						rec, _ = sigCache.GetToolRecord(cID + "_" + itID)
+					}
+					if rec != nil && !rec.IsLegacy {
+						if rec.ToolName != name || !equalToolArgs(rec.Args, args) {
+							return true, "", false
+						}
+						return false, rec.ThoughtSignature, false
+					}
+				}
+
 				if vtp != nil {
 					hasCarrier = true
 					if vtp.Name != name || !equalToolArgs(vtp.Args, args) {
@@ -754,9 +809,27 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 					if callID != "" && itemID != "" && sigCache != nil {
 						recByCall, hasRecCall := sigCache.GetToolRecord(callID)
 						recByID, hasRecID := sigCache.GetToolRecord(itemID)
-						if hasRecCall && hasRecID && recByCall.BridgeCallID != recByID.BridgeCallID {
-							return nil, fmt.Errorf("tool call identity conflict: call_id %q and id %q resolve to different native records (%s vs %s)",
-								callID, itemID, recByCall.BridgeCallID, recByID.BridgeCallID)
+						if hasRecCall && hasRecID {
+							if !recByCall.IsLegacy && !recByID.IsLegacy {
+								if recByCall.BridgeCallID != recByID.BridgeCallID {
+									return nil, fmt.Errorf("tool call identity conflict: call_id %q and id %q resolve to different native records (%s vs %s)",
+										callID, itemID, recByCall.BridgeCallID, recByID.BridgeCallID)
+								}
+							} else {
+								// Legacy records: reject only if there is a genuine conflict in tool name, args, or signatures
+								if recByCall.ToolName != "" && recByID.ToolName != "" && recByCall.ToolName != recByID.ToolName {
+									return nil, fmt.Errorf("tool call identity conflict: call_id %q and id %q have conflicting tool names (%s vs %s)",
+										callID, itemID, recByCall.ToolName, recByID.ToolName)
+								}
+								if recByCall.Args != nil && recByID.Args != nil && !equalToolArgs(recByCall.Args, recByID.Args) {
+									return nil, fmt.Errorf("tool call identity conflict: call_id %q and id %q have conflicting arguments",
+										callID, itemID)
+								}
+								if recByCall.ThoughtSignature != "" && recByID.ThoughtSignature != "" && recByCall.ThoughtSignature != recByID.ThoughtSignature {
+									return nil, fmt.Errorf("tool call identity conflict: call_id %q and id %q have conflicting thought signatures",
+										callID, itemID)
+								}
+							}
 						}
 					}
 
@@ -808,13 +881,22 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 						}
 					}
 					if rec != nil {
-						ev.HasCache = true
-						if (rec.ToolName != "" && rec.ToolName != name) || (rec.Args != nil && !equalToolArgs(rec.Args, args)) {
-							if !ev.HasCarrier || ev.CarrierMismatch {
+						if !rec.IsLegacy {
+							ev.HasCache = true
+							ev.CacheSig = rec.ThoughtSignature
+							if rec.ToolName != name || !equalToolArgs(rec.Args, args) {
 								ev.CacheMismatch = true
 							}
 						} else {
-							ev.CacheSig = rec.ThoughtSignature
+							if (rec.ToolName != "" && rec.ToolName != name) || (rec.Args != nil && !equalToolArgs(rec.Args, args)) {
+								if !ev.HasCarrier || ev.CarrierMismatch {
+									ev.HasCache = true
+									ev.CacheMismatch = true
+								}
+							} else {
+								ev.HasCache = true
+								ev.CacheSig = rec.ThoughtSignature
+							}
 						}
 					}
 
@@ -1181,7 +1263,11 @@ func equalToolArgs(a, b map[string]any) bool {
 	return string(bytesA) == string(bytesB)
 }
 
-func validateResponsesToolExchange(items []map[string]any) error {
+func validateResponsesToolExchange(items []map[string]any, sigCache ...*upstream.SignatureCache) error {
+	var cache *upstream.SignatureCache
+	if len(sigCache) > 0 {
+		cache = sigCache[0]
+	}
 	callAlias := make(map[string]string)
 	canonicalCalls := make(map[string]bool)
 	for _, item := range items {
@@ -1217,6 +1303,43 @@ func validateResponsesToolExchange(items []map[string]any) error {
 				}
 				callAlias[itemID] = canonicalID
 			}
+
+			if cache != nil {
+				for _, id := range []string{callID, itemID} {
+					if id != "" {
+						if rec, ok := cache.GetToolRecord(id); ok && rec != nil {
+							if rec.UpstreamID != "" {
+								if _, exists := callAlias[rec.UpstreamID]; !exists {
+									callAlias[rec.UpstreamID] = canonicalID
+								}
+							}
+							if rec.OutputItemID != "" {
+								if _, exists := callAlias[rec.OutputItemID]; !exists {
+									callAlias[rec.OutputItemID] = canonicalID
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, item := range items {
+		if itemType, _ := item["type"].(string); itemType == "reasoning" {
+			if enc, ok := item["encrypted_content"].(string); ok && enc != "" {
+				if state := DecodeReasoningEncryptedContent(enc); state != nil {
+					for _, p := range state.Parts {
+						if p.Kind == PartKindToolCall && p.UpstreamID != "" && p.CallID != "" {
+							if canonical, ok := callAlias[p.CallID]; ok {
+								if _, exists := callAlias[p.UpstreamID]; !exists {
+									callAlias[p.UpstreamID] = canonical
+								}
+							}
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -1245,11 +1368,19 @@ func validateResponsesToolExchange(items []map[string]any) error {
 				return fmt.Errorf("function_call_output item missing call_id")
 			}
 			canonicalID := callAlias[refID]
+			if canonicalID == "" && cache != nil {
+				if rec, ok := cache.GetToolRecord(refID); ok && rec != nil {
+					canonicalID = callAlias[rec.BridgeCallID]
+					if canonicalID == "" {
+						canonicalID = rec.BridgeCallID
+					}
+				}
+			}
 			if canonicalID == "" {
 				canonicalID = refID
 			}
 			if seenCalls[canonicalID] == 0 {
-				if canonicalCalls[canonicalID] {
+				if canonicalCalls[canonicalID] || canonicalCalls[refID] {
 					return fmt.Errorf("invalid tool result for call %q: result precedes function call", refID)
 				}
 				return fmt.Errorf("orphan tool result for call %q: no corresponding function call found", refID)
@@ -1263,12 +1394,25 @@ func validateResponsesToolExchange(items []map[string]any) error {
 	return nil
 }
 
-func validateChatToolExchange(messages []ChatMessage) error {
+func validateChatToolExchange(messages []ChatMessage, sigCache ...*upstream.SignatureCache) error {
+	var cache *upstream.SignatureCache
+	if len(sigCache) > 0 {
+		cache = sigCache[0]
+	}
 	allCalls := make(map[string]bool)
+	callAlias := make(map[string]string)
 	for _, m := range messages {
 		for _, tc := range m.ToolCalls {
 			if tc.ID != "" {
 				allCalls[tc.ID] = true
+				callAlias[tc.ID] = tc.ID
+				if cache != nil {
+					if rec, ok := cache.GetToolRecord(tc.ID); ok && rec != nil {
+						if rec.UpstreamID != "" {
+							callAlias[rec.UpstreamID] = tc.ID
+						}
+					}
+				}
 			}
 		}
 	}
@@ -1281,13 +1425,17 @@ func validateChatToolExchange(messages []ChatMessage) error {
 		if len(m.ToolCalls) > 0 {
 			for _, tc := range m.ToolCalls {
 				if tc.ID != "" {
-					if seenResults[tc.ID] > 0 {
+					canonicalID := callAlias[tc.ID]
+					if canonicalID == "" {
+						canonicalID = tc.ID
+					}
+					if seenResults[canonicalID] > 0 {
 						return fmt.Errorf("invalid tool result for call %q: result precedes function call", tc.ID)
 					}
-					if seenCalls[tc.ID] > 0 {
+					if seenCalls[canonicalID] > 0 {
 						return fmt.Errorf("duplicate function call id %q", tc.ID)
 					}
-					seenCalls[tc.ID]++
+					seenCalls[canonicalID]++
 				}
 			}
 		}
@@ -1296,16 +1444,28 @@ func validateChatToolExchange(messages []ChatMessage) error {
 			if callID == "" {
 				return fmt.Errorf("tool message missing tool_call_id")
 			}
-			if seenCalls[callID] == 0 {
-				if allCalls[callID] {
+			canonicalID := callAlias[callID]
+			if canonicalID == "" && cache != nil {
+				if rec, ok := cache.GetToolRecord(callID); ok && rec != nil {
+					canonicalID = callAlias[rec.BridgeCallID]
+					if canonicalID == "" {
+						canonicalID = rec.BridgeCallID
+					}
+				}
+			}
+			if canonicalID == "" {
+				canonicalID = callID
+			}
+			if seenCalls[canonicalID] == 0 {
+				if allCalls[canonicalID] || allCalls[callID] {
 					return fmt.Errorf("invalid tool result for call %q: result precedes function call", callID)
 				}
 				return fmt.Errorf("orphan tool result for call %q: no corresponding function call found", callID)
 			}
-			if seenResults[callID] > 0 {
+			if seenResults[canonicalID] > 0 {
 				return fmt.Errorf("duplicate tool result for call %q", callID)
 			}
-			seenResults[callID]++
+			seenResults[canonicalID]++
 		}
 	}
 	return nil

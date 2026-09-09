@@ -143,7 +143,69 @@ func handleStreamingResponses(w http.ResponseWriter, stream io.Reader, respID, i
 		lastFinishReason     string
 		terminalReceived     bool
 		readErr              error
+		fcOutputIndexes      = make(map[string]int)
+		fcFinalized          = make(map[string]bool)
 	)
+
+	finalizeFC := func(callID string) {
+		if callID == "" || fcFinalized[callID] {
+			return
+		}
+		fcFinalized[callID] = true
+		idx, ok := fcOutputIndexes[callID]
+		if !ok {
+			return
+		}
+		var part *TurnPartRecord
+		for i := range turnAcc.turn.Parts {
+			if turnAcc.turn.Parts[i].CallID == callID {
+				part = &turnAcc.turn.Parts[i]
+				break
+			}
+		}
+		if part == nil {
+			return
+		}
+		wireNamespace, wireName := splitWireFunctionName(part.ToolName)
+		argsBytes, _ := json.Marshal(part.Args)
+
+		argsDone := map[string]any{
+			"type":         "response.function_call_arguments.done",
+			"item_id":      part.OutputItemID,
+			"output_index": idx,
+			"call_id":      part.CallID,
+			"name":         wireName,
+			"arguments":    string(argsBytes),
+		}
+		if wireNamespace != "" {
+			argsDone["namespace"] = wireNamespace
+		}
+		sendSSE("response.function_call_arguments.done", argsDone)
+
+		fcItem := map[string]any{
+			"id":        part.OutputItemID,
+			"type":      "function_call",
+			"status":    "completed",
+			"call_id":   part.CallID,
+			"name":      wireName,
+			"arguments": string(argsBytes),
+		}
+		if wireNamespace != "" {
+			fcItem["namespace"] = wireNamespace
+		}
+		sig := part.ThoughtSignature
+		if sig == "" && turnAcc.turn.ToolSignatures != nil {
+			sig = turnAcc.turn.ToolSignatures[part.CallID]
+		}
+		if sig != "" {
+			fcItem["thought_signature"] = sig
+		}
+		sendSSE("response.output_item.done", map[string]any{
+			"type":         "response.output_item.done",
+			"output_index": idx,
+			"item":         fcItem,
+		})
+	}
 
 	emitFlushedMsg := func(flushed *TurnPartRecord) {
 		if flushed == nil {
@@ -248,63 +310,33 @@ func handleStreamingResponses(w http.ResponseWriter, stream io.Reader, respID, i
 				flushCurrentMsg()
 				_, added := turnAcc.ProcessPart(part)
 				if added != nil {
-					fcOutputIndex := outputIndex
-					outputIndex++
-					wireNamespace, wireName := splitWireFunctionName(added.ToolName)
-					argsBytes, _ := json.Marshal(added.Args)
+					fcOutputIndex, exists := fcOutputIndexes[added.CallID]
+					if !exists {
+						fcOutputIndex = outputIndex
+						outputIndex++
+						fcOutputIndexes[added.CallID] = fcOutputIndex
 
-					addedItem := map[string]any{
-						"id":        added.OutputItemID,
-						"type":      "function_call",
-						"status":    "in_progress",
-						"call_id":   added.CallID,
-						"name":      wireName,
-						"arguments": "",
+						wireNamespace, wireName := splitWireFunctionName(added.ToolName)
+						addedItem := map[string]any{
+							"id":        added.OutputItemID,
+							"type":      "function_call",
+							"status":    "in_progress",
+							"call_id":   added.CallID,
+							"name":      wireName,
+							"arguments": "",
+						}
+						if wireNamespace != "" {
+							addedItem["namespace"] = wireNamespace
+						}
+						if added.ThoughtSignature != "" {
+							addedItem["thought_signature"] = added.ThoughtSignature
+						}
+						sendSSE("response.output_item.added", map[string]any{
+							"type":         "response.output_item.added",
+							"output_index": fcOutputIndex,
+							"item":         addedItem,
+						})
 					}
-					if wireNamespace != "" {
-						addedItem["namespace"] = wireNamespace
-					}
-					if added.ThoughtSignature != "" {
-						addedItem["thought_signature"] = added.ThoughtSignature
-					}
-					sendSSE("response.output_item.added", map[string]any{
-						"type":         "response.output_item.added",
-						"output_index": fcOutputIndex,
-						"item":         addedItem,
-					})
-
-					argsDone := map[string]any{
-						"type":         "response.function_call_arguments.done",
-						"item_id":      added.OutputItemID,
-						"output_index": fcOutputIndex,
-						"call_id":      added.CallID,
-						"name":         wireName,
-						"arguments":    string(argsBytes),
-					}
-					if wireNamespace != "" {
-						argsDone["namespace"] = wireNamespace
-					}
-					sendSSE("response.function_call_arguments.done", argsDone)
-
-					fcItem := map[string]any{
-						"id":        added.OutputItemID,
-						"type":      "function_call",
-						"status":    "completed",
-						"call_id":   added.CallID,
-						"name":      wireName,
-						"arguments": string(argsBytes),
-					}
-					if wireNamespace != "" {
-						fcItem["namespace"] = wireNamespace
-					}
-					if added.ThoughtSignature != "" {
-						fcItem["thought_signature"] = added.ThoughtSignature
-					}
-					sendSSE("response.output_item.done", map[string]any{
-						"type":         "response.output_item.done",
-						"output_index": fcOutputIndex,
-						"item":         fcItem,
-					})
 				}
 			} else if part.Text != "" || part.ThoughtSignature != "" {
 				if part.Text == "" && part.ThoughtSignature != "" {
@@ -380,6 +412,12 @@ func handleStreamingResponses(w http.ResponseWriter, stream io.Reader, respID, i
 			},
 		})
 		return
+	}
+
+	for _, p := range turnAcc.turn.Parts {
+		if p.Kind == PartKindToolCall && !fcFinalized[p.CallID] {
+			finalizeFC(p.CallID)
+		}
 	}
 
 	flushCurrentMsg()
@@ -506,8 +544,7 @@ func handleNonStreamingResponses(w http.ResponseWriter, stream io.Reader, respID
 	}
 
 	var allOutputs []map[string]any
-	turn := BuildAuthoritativeTurn(acc.Parts, itemID, model)
-	turn.TurnID = respID
+	turn := BuildAuthoritativeTurn(acc.Parts, itemID, model, respID)
 	turn.PopulateCache(sigCache, pHash)
 	allOutputs = turn.ToOutputItems()
 

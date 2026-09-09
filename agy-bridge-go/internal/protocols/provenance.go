@@ -51,6 +51,11 @@ func ClassifyToolCall(ev ProvenanceEvidence) ToolCallOrigin {
 		return OriginMismatched
 	}
 
+	// Contradictory evidence: carrier signature conflicts with authoritative cache signature
+	if ev.HasCarrier && ev.HasCache && ev.CarrierSig != "" && ev.CacheSig != "" && ev.CarrierSig != ev.CacheSig {
+		return OriginMismatched
+	}
+
 	// 2. If carrier exists with matching content:
 	if ev.HasCarrier {
 		return OriginNative
@@ -113,9 +118,11 @@ func ResolveToolSignature(ev ProvenanceEvidence) (ResolutionResult, error) {
 			return ResolutionResult{Origin: OriginNative},
 				fmt.Errorf("tool call %q (id: %s) is missing required cryptographic thought signature: native call has no corresponding tool result", ev.Name, ev.CallID)
 		}
-		sig := ev.CarrierSig
-		if sig == "" {
+		var sig string
+		if ev.HasCache && ev.CacheSig != "" {
 			sig = ev.CacheSig
+		} else if ev.CarrierSig != "" {
+			sig = ev.CarrierSig
 		}
 		if sig == "" && ev.IsRecordedSib && ev.SiblingLeadSig != "" {
 			sig = ev.SiblingLeadSig

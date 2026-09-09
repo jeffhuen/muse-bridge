@@ -23,6 +23,7 @@ func TestCrossSessionIDIsolation(t *testing.T) {
 		ThoughtSignature: sessionASig,
 		Model:            "gemini-2.5-pro",
 		TurnID:           "turn_session_a",
+		IsLegacy:         true,
 	}, "fc_session_a_1")
 
 	// Session B (e.g. in quickbooks_ex): tool "exec_command" with identical ID "call_987397"
@@ -327,12 +328,8 @@ func TestCarrierOnlyRecovery(t *testing.T) {
 		t.Errorf("got signature %q, want %q", foundSig, carrierSig)
 	}
 
-	// Verify that emptyCache was repopulated by carrier recovery
-	rec, ok := emptyCache.GetToolRecord("call_carrier_recover_1")
-	if !ok || rec == nil {
-		t.Fatalf("expected emptyCache to be repopulated with recovered record")
-	}
-	if rec.ThoughtSignature != carrierSig || rec.ToolName != "fetch_data" {
-		t.Errorf("cache record mismatch: %+v", rec)
+	// Carrier-only recovery is request-local; translation must not mutate cache state
+	if rec, ok := emptyCache.GetToolRecord("call_carrier_recover_1"); ok && rec != nil {
+		t.Fatalf("carrier recovery should be request-local and not write to cache")
 	}
 }

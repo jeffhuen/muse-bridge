@@ -38,6 +38,24 @@ func cloneArgs(m map[string]any) map[string]any {
 	return cloned
 }
 
+func equalArgs(a, b map[string]any) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	if len(a) != len(b) {
+		return false
+	}
+	ba, errA := json.Marshal(a)
+	bb, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	return string(ba) == string(bb)
+}
+
 func (r *NativeToolRecord) Clone() *NativeToolRecord {
 	if r == nil {
 		return nil
@@ -145,6 +163,7 @@ func (c *SignatureCache) GetMessageSignature(id string) string {
 }
 
 // PutToolRecord registers a native tool record and binds all associated aliases.
+// Conflicting alias bindings and conflicting overwrites of authoritative records are rejected.
 func (c *SignatureCache) PutToolRecord(rec *NativeToolRecord, aliases ...string) {
 	if rec == nil || rec.BridgeCallID == "" {
 		return
@@ -155,6 +174,24 @@ func (c *SignatureCache) PutToolRecord(rec *NativeToolRecord, aliases ...string)
 	}
 	if c.aliases == nil {
 		c.aliases = make(map[string]string)
+	}
+
+	// Check if BridgeCallID was already bound as an alias to another record
+	if existingCanonical, exists := c.aliases[rec.BridgeCallID]; exists && existingCanonical != rec.BridgeCallID {
+		c.mu.Unlock()
+		return
+	}
+
+	// If the record already exists, prevent conflicting overwrite
+	if existingRec, exists := c.records[rec.BridgeCallID]; exists && existingRec != nil {
+		if !existingRec.IsLegacy && existingRec.ToolName != "" && rec.ToolName != "" &&
+			(existingRec.ToolName != rec.ToolName || (existingRec.Args != nil && rec.Args != nil && !equalArgs(existingRec.Args, rec.Args))) {
+			c.mu.Unlock()
+			return
+		}
+		if existingRec.ThoughtSignature != "" && rec.ThoughtSignature == "" {
+			rec.ThoughtSignature = existingRec.ThoughtSignature
+		}
 	}
 
 	cloned := rec.Clone()
@@ -184,6 +221,23 @@ func (c *SignatureCache) PutToolRecord(rec *NativeToolRecord, aliases ...string)
 	c.aliases[rec.BridgeCallID] = rec.BridgeCallID
 	for _, a := range aliases {
 		if a != "" {
+			if existingRec, exists := c.records[a]; exists && existingRec != nil && a != rec.BridgeCallID {
+				// Alias matches an existing canonical record: ignore to prevent hiding or ambiguity
+				continue
+			}
+			if existingTarget, exists := c.aliases[a]; exists && existingTarget != rec.BridgeCallID {
+				// Conflicting alias binding: alias 'a' is claimed by multiple canonical records.
+				// Mark ambiguous and delete alias so it cannot silently resolve to another record.
+				if c.ambiguous == nil {
+					c.ambiguous = make(map[string]bool)
+				}
+				c.ambiguous[a] = true
+				delete(c.aliases, a)
+				continue
+			}
+			if c.ambiguous != nil && c.ambiguous[a] {
+				continue
+			}
 			c.aliases[a] = rec.BridgeCallID
 		}
 	}
@@ -205,6 +259,17 @@ func (c *SignatureCache) GetToolRecord(alias string) (*NativeToolRecord, bool) {
 	}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+
+	// Direct canonical record lookup always takes precedence
+	if c.records != nil {
+		if rec, ok := c.records[alias]; ok && rec != nil {
+			return rec.Clone(), true
+		}
+	}
+
+	if c.ambiguous != nil && c.ambiguous[alias] {
+		return nil, false
+	}
 
 	canonicalID := alias
 	if c.aliases != nil {
@@ -524,13 +589,36 @@ func (c *SignatureCache) LoadFromFile(filePath string) error {
 		for a, target := range data.Aliases {
 			c.aliases[a] = target
 		}
-	} else if len(data.ToolSigs) > 0 {
-		// Visibly legacy migration: do not invent upstream IDs, model ownership, or turn IDs
-		for k, sig := range data.ToolSigs {
+	} else if len(data.ToolSigs) > 0 || len(data.ToolNames) > 0 || len(data.ToolArgs) > 0 {
+		// Visibly legacy migration: do not invent upstream IDs, model ownership, or turn IDs.
+		// Import the union of legacy tool signature, name, and argument keys to preserve unsigned sibling metadata.
+		legacyKeys := make(map[string]bool)
+		for k := range data.ToolSigs {
+			legacyKeys[k] = true
+		}
+		for k := range data.ToolNames {
+			legacyKeys[k] = true
+		}
+		for k := range data.ToolArgs {
+			legacyKeys[k] = true
+		}
+		for k := range legacyKeys {
+			var sig string
+			if data.ToolSigs != nil {
+				sig = data.ToolSigs[k]
+			}
+			var toolName string
+			if data.ToolNames != nil {
+				toolName = data.ToolNames[k]
+			}
+			var args map[string]any
+			if data.ToolArgs != nil {
+				args = data.ToolArgs[k]
+			}
 			rec := &NativeToolRecord{
 				BridgeCallID:     k,
-				ToolName:         data.ToolNames[k],
-				Args:             cloneArgs(data.ToolArgs[k]),
+				ToolName:         toolName,
+				Args:             cloneArgs(args),
 				ThoughtSignature: sig,
 				IsLegacy:         true,
 			}

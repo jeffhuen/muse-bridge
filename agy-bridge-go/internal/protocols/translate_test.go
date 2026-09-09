@@ -10,7 +10,7 @@ import (
 
 func TestConvertChatToPrediction(t *testing.T) {
 	sigCache := upstream.NewSignatureCache(100)
-	sigCache.PutToolSignature("call_tokyo_123", "sig_tokyo_test_signature")
+	sigCache.PutToolDetails("call_tokyo_123", "get_weather", map[string]any{"city": "Tokyo"}, "sig_tokyo_test_signature")
 
 	req := &ChatRequest{
 		Model: "gemini-3.8-flash",
@@ -144,7 +144,7 @@ func TestNormalizeAlternatingContents(t *testing.T) {
 
 func TestConvertResponsesToPrediction(t *testing.T) {
 	sigCache := upstream.NewSignatureCache(100)
-	sigCache.PutToolSignature("call_calc_999", "sig_calc_signature_xyz")
+	sigCache.PutToolDetails("call_calc_999", "calc", map[string]any{"expr": "5+5"}, "sig_calc_signature_xyz")
 
 	req := &ResponsesRequest{
 		Model:        "gemini-3.8-flash",

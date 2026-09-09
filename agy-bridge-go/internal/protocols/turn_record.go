@@ -1,6 +1,8 @@
 package protocols
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -188,19 +190,61 @@ func (acc *AuthoritativeTurnAccumulator) ProcessPart(part upstream.Part) (flushe
 	if part.FunctionCall != nil {
 		flushed = acc.FlushPendingText()
 		fc := part.FunctionCall
-		callID := fc.ID
 		upstreamID := fc.ID
-		if callID == "" {
-			callID = RandomID("call")
-			fc.ID = callID
+		var bridgeCallID string
+		var fcID string
+		if upstreamID != "" {
+			var ok bool
+			bridgeCallID, ok = acc.upstreamToBridgeID[upstreamID]
+			if !ok {
+				if acc.turn.TurnID != "" || acc.baseItemID != "" {
+					h := sha256.Sum256([]byte(acc.turn.TurnID + "_" + acc.baseItemID + "_" + upstreamID + "_" + fmt.Sprintf("%d", len(acc.turn.Parts))))
+					bridgeCallID = "call_" + hex.EncodeToString(h[:12])
+					fcID = "fc_" + hex.EncodeToString(h[12:24])
+				} else {
+					bridgeCallID = RandomID("call")
+					fcID = RandomID("fc")
+				}
+				acc.upstreamToBridgeID[upstreamID] = bridgeCallID
+				acc.upstreamToItemID[upstreamID] = fcID
+			} else {
+				fcID = acc.upstreamToItemID[upstreamID]
+			}
+		} else {
+			if acc.turn.TurnID != "" || acc.baseItemID != "" {
+				h := sha256.Sum256([]byte(acc.turn.TurnID + "_" + acc.baseItemID + "_" + fmt.Sprintf("%d", len(acc.turn.Parts))))
+				bridgeCallID = "call_" + hex.EncodeToString(h[:12])
+				fcID = "fc_" + hex.EncodeToString(h[12:24])
+			} else {
+				bridgeCallID = RandomID("call")
+				fcID = RandomID("fc")
+			}
 		}
-		fcID := RandomID("fc")
+		fc.ID = bridgeCallID
 		sig := part.ThoughtSignature
+
+		// If this is an update to an already-recorded call in streaming, update in place
+		for i := range acc.turn.Parts {
+			if acc.turn.Parts[i].Kind == PartKindToolCall && acc.turn.Parts[i].CallID == bridgeCallID {
+				if fc.Name != "" {
+					acc.turn.Parts[i].ToolName = fc.Name
+				}
+				if fc.Args != nil {
+					acc.turn.Parts[i].Args = fc.Args
+				}
+				if sig != "" {
+					acc.turn.Parts[i].ThoughtSignature = sig
+					acc.turn.ToolSignatures[bridgeCallID] = sig
+					acc.turn.ToolSignatures[fcID] = sig
+				}
+				return flushed, &acc.turn.Parts[i]
+			}
+		}
 
 		record := TurnPartRecord{
 			Index:            len(acc.turn.Parts),
 			Kind:             PartKindToolCall,
-			CallID:           callID,
+			CallID:           bridgeCallID,
 			UpstreamID:       upstreamID,
 			ToolName:         fc.Name,
 			Args:             fc.Args,
@@ -209,9 +253,9 @@ func (acc *AuthoritativeTurnAccumulator) ProcessPart(part upstream.Part) (flushe
 		}
 		acc.turn.Parts = append(acc.turn.Parts, record)
 		acc.recordOutputItemID(fcID)
-		acc.toolCallIDs = append(acc.toolCallIDs, callID)
+		acc.toolCallIDs = append(acc.toolCallIDs, bridgeCallID)
 		if sig != "" {
-			acc.turn.ToolSignatures[callID] = sig
+			acc.turn.ToolSignatures[bridgeCallID] = sig
 			acc.turn.ToolSignatures[fcID] = sig
 		}
 		return flushed, &record
@@ -280,10 +324,14 @@ func (acc *AuthoritativeTurnAccumulator) Finish() *AuthoritativeTurn {
 }
 
 // BuildAuthoritativeTurn constructs an AuthoritativeTurn from upstream parts.
-func BuildAuthoritativeTurn(parts []upstream.Part, baseItemID string, model ...string) *AuthoritativeTurn {
+// Optional varargs: model (index 0), turnID (index 1).
+func BuildAuthoritativeTurn(parts []upstream.Part, baseItemID string, args ...string) *AuthoritativeTurn {
 	acc := NewAuthoritativeTurnAccumulator(baseItemID)
-	if len(model) > 0 && model[0] != "" {
-		acc.SetModel(model[0])
+	if len(args) > 0 && args[0] != "" {
+		acc.SetModel(args[0])
+	}
+	if len(args) > 1 && args[1] != "" {
+		acc.SetTurnID(args[1])
 	}
 	for _, part := range parts {
 		acc.ProcessPart(part)

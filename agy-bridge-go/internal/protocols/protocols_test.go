@@ -77,6 +77,7 @@ func TestHandleChatCompletionsStreaming(t *testing.T) {
 	}
 
 	var hasReasoning, hasContent, hasToolCall, hasDone bool
+	var emittedToolID string
 	scanner := bufio.NewScanner(rec.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -101,8 +102,13 @@ func TestHandleChatCompletionsStreaming(t *testing.T) {
 			if delta["content"] == "Hello from bridge!" {
 				hasContent = true
 			}
-			if delta["tool_calls"] != nil {
+			if tcList, ok := delta["tool_calls"].([]any); ok && len(tcList) > 0 {
 				hasToolCall = true
+				if tc, ok := tcList[0].(map[string]any); ok {
+					if id, ok := tc["id"].(string); ok && id != "" {
+						emittedToolID = id
+					}
+				}
 			}
 		}
 	}
@@ -121,7 +127,7 @@ func TestHandleChatCompletionsStreaming(t *testing.T) {
 	}
 
 	// Verify thought signature was cached
-	cachedSig := client.SigCache().GetToolSignature("call_read_1")
+	cachedSig := client.SigCache().GetToolSignature(emittedToolID)
 	if cachedSig != "sig_secret_abc" {
 		t.Errorf("thought signature was not properly cached: %q", cachedSig)
 	}
@@ -163,8 +169,8 @@ func TestHandleChatCompletionsNonStreaming(t *testing.T) {
 		t.Fatalf("expected 1 tool call, got %d", len(toolCalls))
 	}
 	tc := toolCalls[0].(map[string]any)
-	if tc["id"] != "call_read_1" {
-		t.Errorf("expected tool call id 'call_read_1', got %v", tc["id"])
+	if id, ok := tc["id"].(string); !ok || !strings.HasPrefix(id, "call_") {
+		t.Errorf("expected bridge-owned tool call id with prefix 'call_', got %v", tc["id"])
 	}
 }
 

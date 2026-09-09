@@ -184,6 +184,7 @@ func handleStreamingChat(w http.ResponseWriter, r *http.Request, stream io.Reade
 		lastUsage          map[string]any
 		readErr            error
 		toolCallBridgeIDs  []string
+		upstreamToBridgeID = make(map[string]string)
 	)
 	var prefixHash string
 	if ph, ok := r.Context().Value(chatContextKey{}).(string); ok {
@@ -214,14 +215,25 @@ func handleStreamingChat(w http.ResponseWriter, r *http.Request, stream io.Reade
 			if part.FunctionCall != nil {
 				hasToolCalls = true
 				fc := part.FunctionCall
-				if fc.ID == "" {
-					fc.ID = RandomID("call")
+				upstreamID := fc.ID
+				var bridgeID string
+				if upstreamID != "" {
+					var exists bool
+					bridgeID, exists = upstreamToBridgeID[upstreamID]
+					if !exists {
+						bridgeID = RandomID("call")
+						upstreamToBridgeID[upstreamID] = bridgeID
+					}
+				} else {
+					bridgeID = RandomID("call")
 				}
-				toolCallBridgeIDs = append(toolCallBridgeIDs, fc.ID)
+				fc.ID = bridgeID
+				toolCallBridgeIDs = append(toolCallBridgeIDs, bridgeID)
 				sig := part.ThoughtSignature
 				if sigCache != nil {
 					rec := &upstream.NativeToolRecord{
-						BridgeCallID:     fc.ID,
+						BridgeCallID:     bridgeID,
+						UpstreamID:       upstreamID,
 						ToolName:         fc.Name,
 						Args:             fc.Args,
 						ThoughtSignature: sig,
@@ -340,17 +352,29 @@ func handleNonStreamingChat(w http.ResponseWriter, stream io.Reader, cmplID stri
 
 	var toolCallBridgeIDs []string
 	var toolCalls []map[string]any
+	upstreamToBridgeID := make(map[string]string)
 	for _, part := range acc.Parts {
 		if part.FunctionCall != nil {
 			fc := part.FunctionCall
-			if fc.ID == "" {
-				fc.ID = RandomID("call")
+			upstreamID := fc.ID
+			var bridgeID string
+			if upstreamID != "" {
+				var exists bool
+				bridgeID, exists = upstreamToBridgeID[upstreamID]
+				if !exists {
+					bridgeID = RandomID("call")
+					upstreamToBridgeID[upstreamID] = bridgeID
+				}
+			} else {
+				bridgeID = RandomID("call")
 			}
-			toolCallBridgeIDs = append(toolCallBridgeIDs, fc.ID)
+			fc.ID = bridgeID
+			toolCallBridgeIDs = append(toolCallBridgeIDs, bridgeID)
 			sig := part.ThoughtSignature
 			if sigCache != nil {
 				rec := &upstream.NativeToolRecord{
-					BridgeCallID:     fc.ID,
+					BridgeCallID:     bridgeID,
+					UpstreamID:       upstreamID,
 					ToolName:         fc.Name,
 					Args:             fc.Args,
 					ThoughtSignature: sig,

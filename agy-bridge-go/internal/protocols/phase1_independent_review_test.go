@@ -24,7 +24,21 @@ func TestPhase1ReviewEditedToolsCannotUseFallbacks(t *testing.T) {
      if sibling {parts=append(parts,upstream.Part{FunctionCall:&upstream.FunctionCall{ID:"call_sibling",Name:"lookup",Args:map[string]any{"key":"second"}}});target="call_sibling"}
      _,outputs:=helperExecuteResponsesTurn(t,streaming,parts,"STOP",cache)
      stripped:=helperSimulateClientStrip(outputs)
-     for _,raw:=range stripped {item:=raw.(map[string]any);if item["type"]=="function_call" && item["call_id"]==target {item["arguments"]=`{"key":"edited"}`}}
+     for _,raw:=range stripped {
+         item:=raw.(map[string]any)
+         if item["type"]=="function_call" {
+             cID, _ := item["call_id"].(string)
+             isTarget := cID == target
+             if !isTarget && cache != nil {
+                 if rec, ok := cache.GetToolRecord(cID); ok && rec != nil && rec.UpstreamID == target {
+                     isTarget = true
+                 }
+             }
+             if isTarget {
+                 item["arguments"]=`{"key":"edited"}`
+             }
+         }
+     }
      history:=[]any{map[string]any{"role":"user","content":"look up"}}
      history=append(history,stripped...)
      history=append(history,map[string]any{"type":"function_call_output","call_id":"call_lead","output":"one"})

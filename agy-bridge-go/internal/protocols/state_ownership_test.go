@@ -74,7 +74,7 @@ func TestStateOwnershipExactToolSignatureRequired(t *testing.T) {
 	}
 
 	// Supply signature in cache and verify it succeeds
-	cache.PutToolInfo("call_ownership_chat_1", "run_terminal", "sig_verified_tool_1")
+	cache.PutToolDetails("call_ownership_chat_1", "run_terminal", map[string]any{"cmd": "ls"}, "sig_verified_tool_1")
 	predChat, err := ConvertChatToPrediction(chatReq, cache)
 	if err != nil {
 		t.Fatalf("ConvertChatToPrediction should succeed with cached signature: %v", err)
@@ -110,7 +110,7 @@ func TestStateOwnershipExactToolSignatureRequired(t *testing.T) {
 	}
 
 	// Supply signature in cache and verify it succeeds
-	cache.PutToolInfo("call_ownership_resp_1", "run_terminal", "sig_verified_tool_2")
+	cache.PutToolDetails("call_ownership_resp_1", "run_terminal", map[string]any{"cmd": "ls"}, "sig_verified_tool_2")
 	predResp, err := ConvertResponsesToPrediction(respReq, cache)
 	if err != nil {
 		t.Fatalf("ConvertResponsesToPrediction should succeed with cached signature: %v", err)
