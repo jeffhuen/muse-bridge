@@ -9,3 +9,7 @@ muse-bridge-go/muse-bridge-go
 muse-bridge-go/muse-bridge-go.exe
 bin/
 bridge-go.log
+agy-bridge-go/dist/
+agy-bridge-go/agy-bridge-go
+agy-bridge-go/agy-bridge-go.exe
+signature_cache.json
