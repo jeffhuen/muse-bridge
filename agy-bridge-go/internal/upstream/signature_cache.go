@@ -10,6 +10,9 @@ import (
 	"time"
 )
 
+// Migration recovery is a replay instruction, never evidence of native ownership.
+const migrationRecoverySignature = "skip_thought_signature_validator"
+
 // NativeToolRecord stores complete native turn state atomically.
 type NativeToolRecord struct {
 	BridgeCallID     string         `json:"call_id"`
@@ -165,7 +168,7 @@ func (c *SignatureCache) GetMessageSignature(id string) string {
 // PutToolRecord registers a native tool record and binds all associated aliases.
 // Conflicting alias bindings and conflicting overwrites of authoritative records are rejected.
 func (c *SignatureCache) PutToolRecord(rec *NativeToolRecord, aliases ...string) {
-	if rec == nil || rec.BridgeCallID == "" {
+	if rec == nil || rec.BridgeCallID == "" || rec.ThoughtSignature == migrationRecoverySignature {
 		return
 	}
 	c.mu.Lock()
@@ -579,14 +582,26 @@ func (c *SignatureCache) LoadFromFile(filePath string) error {
 		c.aliases = make(map[string]string)
 	}
 
+	// Older translators persisted migration markers as native records. Drop only
+	// those records and their ownership metadata; preserve real unsigned siblings.
+	migrationIDs := make(map[string]bool)
 	if data.Version >= 2 && len(data.Records) > 0 {
 		for k, rec := range data.Records {
 			if rec != nil {
+				if rec.ThoughtSignature == migrationRecoverySignature {
+					migrationIDs[k] = true
+					migrationIDs[rec.BridgeCallID] = true
+					continue
+				}
 				c.records[k] = rec.Clone()
 				c.toolOrder = append(c.toolOrder, k)
 			}
 		}
 		for a, target := range data.Aliases {
+			if migrationIDs[target] {
+				migrationIDs[a] = true
+				continue
+			}
 			c.aliases[a] = target
 		}
 	} else if len(data.ToolSigs) > 0 || len(data.ToolNames) > 0 || len(data.ToolArgs) > 0 {
@@ -606,6 +621,10 @@ func (c *SignatureCache) LoadFromFile(filePath string) error {
 			var sig string
 			if data.ToolSigs != nil {
 				sig = data.ToolSigs[k]
+			}
+			if sig == migrationRecoverySignature {
+				migrationIDs[k] = true
+				continue
 			}
 			var toolName string
 			if data.ToolNames != nil {
@@ -650,10 +669,16 @@ func (c *SignatureCache) LoadFromFile(filePath string) error {
 		c.turnSiblings = make(map[string]map[string]bool)
 	}
 	for lead, list := range data.TurnSiblings {
+		if migrationIDs[lead] {
+			continue
+		}
 		if c.turnSiblings[lead] == nil {
 			c.turnSiblings[lead] = make(map[string]bool)
 		}
 		for _, sib := range list {
+			if migrationIDs[sib] {
+				continue
+			}
 			c.turnSiblings[lead][sib] = true
 		}
 	}
