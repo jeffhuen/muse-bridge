@@ -130,6 +130,10 @@ func handleStreamingResponses(w http.ResponseWriter, stream io.Reader, respID, i
 	outputIndex := 0
 
 	turnAcc := NewAuthoritativeTurnAccumulator(itemID)
+	turnAcc.SetModel(model)
+	if respID != "" {
+		turnAcc.SetTurnID(respID)
+	}
 
 	var (
 		currentMsgStarted    bool
@@ -502,7 +506,8 @@ func handleNonStreamingResponses(w http.ResponseWriter, stream io.Reader, respID
 	}
 
 	var allOutputs []map[string]any
-	turn := BuildAuthoritativeTurn(acc.Parts, itemID)
+	turn := BuildAuthoritativeTurn(acc.Parts, itemID, model)
+	turn.TurnID = respID
 	turn.PopulateCache(sigCache, pHash)
 	allOutputs = turn.ToOutputItems()
 

@@ -23,10 +23,11 @@ type TurnPartRecord struct {
 	Kind             TurnPartKind   `json:"kind"`
 	Text             string         `json:"text,omitempty"`
 	ThoughtSignature string         `json:"sig,omitempty"`
-	CallID           string         `json:"call_id,omitempty"`   // tool call id (e.g. call_...)
-	ToolName         string         `json:"tool_name,omitempty"` // upstream tool name
+	CallID           string         `json:"call_id,omitempty"`     // bridge tool call id (e.g. call_...)
+	UpstreamID       string         `json:"upstream_id,omitempty"` // original upstream tool call id (e.g. call_987397)
+	ToolName         string         `json:"tool_name,omitempty"`   // upstream tool name
 	Args             map[string]any `json:"args,omitempty"`
-	OutputItemID     string         `json:"item_id,omitempty"`   // client output item id (e.g. fc_... or msg_...)
+	OutputItemID     string         `json:"item_id,omitempty"` // client output item id (e.g. fc_... or msg_...)
 }
 
 // AuthoritativeTurn is the single authoritative turn representation for both streaming
@@ -35,6 +36,7 @@ type TurnPartRecord struct {
 type AuthoritativeTurn struct {
 	Version        int                 `json:"v"`
 	TurnID         string              `json:"turn_id,omitempty"`
+	Model          string              `json:"model,omitempty"`
 	ReasoningID    string              `json:"reasoning_id,omitempty"`
 	ThoughtSummary string              `json:"thought_summary,omitempty"`
 	OutputOrder    []string            `json:"output_order,omitempty"`
@@ -48,16 +50,18 @@ type AuthoritativeTurn struct {
 // as they arrive (in streaming or batch), preserving exact logical part boundaries, signatures,
 // and item/call identifiers.
 type AuthoritativeTurnAccumulator struct {
-	turn           *AuthoritativeTurn
-	baseItemID     string
-	thoughtBuilder strings.Builder
-	hasThought     bool
-	currentText    strings.Builder
-	currentTextSig string
-	currentTextID  string
-	textCount      int
-	toolCallIDs    []string
-	recordedItems  map[string]bool
+	turn               *AuthoritativeTurn
+	baseItemID         string
+	thoughtBuilder     strings.Builder
+	hasThought         bool
+	currentText        strings.Builder
+	currentTextSig     string
+	currentTextID      string
+	textCount          int
+	toolCallIDs        []string
+	recordedItems      map[string]bool
+	upstreamToBridgeID map[string]string
+	upstreamToItemID   map[string]string
 }
 
 // NewAuthoritativeTurnAccumulator returns a new incremental turn accumulator.
@@ -70,9 +74,21 @@ func NewAuthoritativeTurnAccumulator(baseItemID string) *AuthoritativeTurnAccumu
 			TextSignatures: make(map[string]string),
 			TurnSiblings:   make(map[string][]string),
 		},
-		baseItemID:    baseItemID,
-		recordedItems: make(map[string]bool),
+		baseItemID:         baseItemID,
+		recordedItems:      make(map[string]bool),
+		upstreamToBridgeID: make(map[string]string),
+		upstreamToItemID:   make(map[string]string),
 	}
+}
+
+// SetModel records the model name on the turn.
+func (acc *AuthoritativeTurnAccumulator) SetModel(model string) {
+	acc.turn.Model = model
+}
+
+// SetTurnID records the turn identifier on the turn.
+func (acc *AuthoritativeTurnAccumulator) SetTurnID(turnID string) {
+	acc.turn.TurnID = turnID
 }
 
 func (acc *AuthoritativeTurnAccumulator) recordOutputItemID(id string) {
@@ -173,6 +189,7 @@ func (acc *AuthoritativeTurnAccumulator) ProcessPart(part upstream.Part) (flushe
 		flushed = acc.FlushPendingText()
 		fc := part.FunctionCall
 		callID := fc.ID
+		upstreamID := fc.ID
 		if callID == "" {
 			callID = RandomID("call")
 			fc.ID = callID
@@ -184,6 +201,7 @@ func (acc *AuthoritativeTurnAccumulator) ProcessPart(part upstream.Part) (flushe
 			Index:            len(acc.turn.Parts),
 			Kind:             PartKindToolCall,
 			CallID:           callID,
+			UpstreamID:       upstreamID,
 			ToolName:         fc.Name,
 			Args:             fc.Args,
 			ThoughtSignature: sig,
@@ -262,8 +280,11 @@ func (acc *AuthoritativeTurnAccumulator) Finish() *AuthoritativeTurn {
 }
 
 // BuildAuthoritativeTurn constructs an AuthoritativeTurn from upstream parts.
-func BuildAuthoritativeTurn(parts []upstream.Part, baseItemID string) *AuthoritativeTurn {
+func BuildAuthoritativeTurn(parts []upstream.Part, baseItemID string, model ...string) *AuthoritativeTurn {
 	acc := NewAuthoritativeTurnAccumulator(baseItemID)
+	if len(model) > 0 && model[0] != "" {
+		acc.SetModel(model[0])
+	}
 	for _, part := range parts {
 		acc.ProcessPart(part)
 	}
@@ -283,6 +304,8 @@ func (t *AuthoritativeTurn) ToOutputItems() []map[string]any {
 	if t.NeedsReasoningItem() {
 		encContent := EncodeReasoningEncryptedContent(ReasoningEncryptedState{
 			Version:        t.Version,
+			Model:          t.Model,
+			TurnID:         t.TurnID,
 			Parts:          t.Parts,
 			ToolSignatures: t.ToolSignatures,
 			TurnSiblings:   t.TurnSiblings,
@@ -383,11 +406,29 @@ func (t *AuthoritativeTurn) PopulateCache(sigCache *upstream.SignatureCache, pre
 	for _, p := range t.Parts {
 		switch p.Kind {
 		case PartKindToolCall:
-			sigCache.PutToolDetails(p.CallID, p.ToolName, p.Args, p.ThoughtSignature)
-			sigCache.PutToolDetails(p.OutputItemID, p.ToolName, p.Args, p.ThoughtSignature)
+			rec := &upstream.NativeToolRecord{
+				BridgeCallID:     p.CallID,
+				OutputItemID:     p.OutputItemID,
+				UpstreamID:       p.UpstreamID,
+				ToolName:         p.ToolName,
+				Args:             p.Args,
+				ThoughtSignature: p.ThoughtSignature,
+				Model:            t.Model,
+				TurnID:           t.TurnID,
+			}
+			var aliases []string
+			if p.OutputItemID != "" {
+				aliases = append(aliases, p.OutputItemID)
+				if p.CallID != "" {
+					aliases = append(aliases, p.CallID+"_"+p.OutputItemID)
+				}
+			}
+			sigCache.PutToolRecord(rec, aliases...)
 			if p.ThoughtSignature != "" {
 				sigCache.PutMessageSignature(p.CallID, p.ThoughtSignature)
-				sigCache.PutMessageSignature(p.OutputItemID, p.ThoughtSignature)
+				if p.OutputItemID != "" {
+					sigCache.PutMessageSignature(p.OutputItemID, p.ThoughtSignature)
+				}
 			}
 		case PartKindText:
 			if p.ThoughtSignature != "" {

@@ -174,14 +174,17 @@ func handleStreamingChat(w http.ResponseWriter, r *http.Request, stream io.Reade
 	}
 
 	decoder := NewUpstreamDecoder(stream)
-	hasToolCalls := false
-	var lastUsage map[string]any
-	toolCallIndexes := make(map[string]int)
-	nextToolIndex := 0
-	var readErr error
-	terminalReceived := false
-	lastTextThoughtSig := ""
-	var fullText strings.Builder
+	var (
+		fullText           strings.Builder
+		lastTextThoughtSig string
+		hasToolCalls       bool
+		toolCallIndexes    = make(map[string]int)
+		nextToolIndex      = 0
+		terminalReceived   bool
+		lastUsage          map[string]any
+		readErr            error
+		toolCallBridgeIDs  []string
+	)
 	var prefixHash string
 	if ph, ok := r.Context().Value(chatContextKey{}).(string); ok {
 		prefixHash = ph
@@ -214,9 +217,17 @@ func handleStreamingChat(w http.ResponseWriter, r *http.Request, stream io.Reade
 				if fc.ID == "" {
 					fc.ID = RandomID("call")
 				}
+				toolCallBridgeIDs = append(toolCallBridgeIDs, fc.ID)
 				sig := part.ThoughtSignature
 				if sigCache != nil {
-					sigCache.PutToolInfo(fc.ID, fc.Name, sig)
+					rec := &upstream.NativeToolRecord{
+						BridgeCallID:     fc.ID,
+						ToolName:         fc.Name,
+						Args:             fc.Args,
+						ThoughtSignature: sig,
+						Model:            model,
+					}
+					sigCache.PutToolRecord(rec)
 				}
 				idx, exists := toolCallIndexes[fc.ID]
 				if !exists {
@@ -261,6 +272,9 @@ func handleStreamingChat(w http.ResponseWriter, r *http.Request, stream io.Reade
 			}
 		case StreamEventTerminal:
 			terminalReceived = true
+			if len(toolCallBridgeIDs) > 1 && sigCache != nil {
+				sigCache.RecordTurnSiblings(toolCallBridgeIDs[0], toolCallBridgeIDs[1:])
+			}
 			finishReason := "stop"
 			if hasToolCalls {
 				finishReason = "tool_calls"
@@ -324,6 +338,7 @@ func handleNonStreamingChat(w http.ResponseWriter, stream io.Reader, cmplID stri
 		return
 	}
 
+	var toolCallBridgeIDs []string
 	var toolCalls []map[string]any
 	for _, part := range acc.Parts {
 		if part.FunctionCall != nil {
@@ -331,9 +346,17 @@ func handleNonStreamingChat(w http.ResponseWriter, stream io.Reader, cmplID stri
 			if fc.ID == "" {
 				fc.ID = RandomID("call")
 			}
+			toolCallBridgeIDs = append(toolCallBridgeIDs, fc.ID)
 			sig := part.ThoughtSignature
 			if sigCache != nil {
-				sigCache.PutToolInfo(fc.ID, fc.Name, sig)
+				rec := &upstream.NativeToolRecord{
+					BridgeCallID:     fc.ID,
+					ToolName:         fc.Name,
+					Args:             fc.Args,
+					ThoughtSignature: sig,
+					Model:            model,
+				}
+				sigCache.PutToolRecord(rec)
 			}
 			argsBytes, _ := json.Marshal(fc.Args)
 			tcItem := map[string]any{
@@ -349,6 +372,9 @@ func handleNonStreamingChat(w http.ResponseWriter, stream io.Reader, cmplID stri
 			}
 			toolCalls = append(toolCalls, tcItem)
 		}
+	}
+	if len(toolCallBridgeIDs) > 1 && sigCache != nil {
+		sigCache.RecordTurnSiblings(toolCallBridgeIDs[0], toolCallBridgeIDs[1:])
 	}
 
 	if acc.VisibleText != "" && acc.LastTextSig != "" && sigCache != nil {

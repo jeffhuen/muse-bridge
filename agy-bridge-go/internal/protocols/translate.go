@@ -16,6 +16,8 @@ import (
 // ReasoningEncryptedState carries opaque turn state across Responses client turns.
 type ReasoningEncryptedState struct {
 	Version        int                 `json:"v"`
+	Model          string              `json:"model,omitempty"`
+	TurnID         string              `json:"turn_id,omitempty"`
 	Parts          []TurnPartRecord    `json:"parts,omitempty"`
 	ToolSignatures map[string]string   `json:"tool_sigs,omitempty"`
 	TurnSiblings   map[string][]string `json:"turn_siblings,omitempty"`
@@ -216,24 +218,16 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 						ev.CarrierSig = tc.ThoughtSignature
 						ev.HasCarrier = true
 					}
+					var rec *upstream.NativeToolRecord
 					if sigCache != nil && tc.ID != "" {
-						cachedName := sigCache.GetToolName(tc.ID)
-						cachedArgs := sigCache.GetToolArgs(tc.ID)
-						if cachedName != "" || cachedArgs != nil {
-							ev.HasCache = true
-							if (cachedName != "" && cachedName != tc.Function.Name) || (cachedArgs != nil && !equalToolArgs(cachedArgs, args)) {
-								ev.CacheMismatch = true
-							} else {
-								ev.CacheSig = sigCache.GetToolSignature(tc.ID)
-							}
+						rec, _ = sigCache.GetToolRecord(tc.ID)
+					}
+					if rec != nil {
+						ev.HasCache = true
+						if (rec.ToolName != "" && rec.ToolName != tc.Function.Name) || (rec.Args != nil && !equalToolArgs(rec.Args, args)) {
+							ev.CacheMismatch = true
 						} else {
-							if sig := sigCache.GetToolSignature(tc.ID); sig != "" {
-								ev.CacheSig = sig
-								ev.HasCache = true
-							} else if sig := sigCache.GetMessageSignature(tc.ID); sig != "" {
-								ev.CacheSig = sig
-								ev.HasCache = true
-							}
+							ev.CacheSig = rec.ThoughtSignature
 						}
 					}
 					if ev.CarrierSig == "" && len(m.ToolCalls) == 1 {
@@ -254,9 +248,8 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 							if other.ThoughtSignature != "" {
 								otherSig = other.ThoughtSignature
 							} else if sigCache != nil {
-								otherSig = sigCache.GetToolSignature(other.ID)
-								if otherSig == "" {
-									otherSig = sigCache.GetMessageSignature(other.ID)
+								if otherRec, ok := sigCache.GetToolRecord(other.ID); ok {
+									otherSig = otherRec.ThoughtSignature
 								}
 							}
 							if otherSig != "" {
@@ -264,7 +257,11 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 								if sigCache != nil && sigCache.IsVerifiedSibling(other.ID, tc.ID) {
 									ev.IsRecordedSib = true
 									ev.HasSiblingLead = true
-									ev.SiblingLeadSig = otherSig
+									if otherRec, ok := sigCache.GetToolRecord(other.ID); ok && otherRec.ThoughtSignature != "" {
+										ev.SiblingLeadSig = otherRec.ThoughtSignature
+									} else {
+										ev.SiblingLeadSig = otherSig
+									}
 									break
 								}
 							}
@@ -279,6 +276,9 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 						return nil, err
 					}
 					callPart.ThoughtSignature = res.ThoughtSignature
+					if rec != nil && rec.UpstreamID != "" {
+						callPart.FunctionCall.ID = rec.UpstreamID
+					}
 					parts = append(parts, callPart)
 				}
 			}
@@ -293,12 +293,20 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 			if err := json.Unmarshal([]byte(text), &respObj); err != nil {
 				respObj = map[string]any{"response": text}
 			}
+			respID := m.ToolCallID
 			funcName := m.Name
+			if sigCache != nil && m.ToolCallID != "" {
+				if r, ok := sigCache.GetToolRecord(m.ToolCallID); ok {
+					if funcName == "" {
+						funcName = r.ToolName
+					}
+					if r.UpstreamID != "" {
+						respID = r.UpstreamID
+					}
+				}
+			}
 			if funcName == "" {
 				funcName = callNames[m.ToolCallID]
-			}
-			if funcName == "" && sigCache != nil {
-				funcName = sigCache.GetToolName(m.ToolCallID)
 			}
 			if funcName == "" {
 				funcName = m.ToolCallID
@@ -310,7 +318,7 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 						FunctionResponse: &upstream.FunctionResponse{
 							Name:     funcName,
 							Response: respObj,
-							ID:       m.ToolCallID,
+							ID:       respID,
 						},
 					},
 				},
@@ -490,9 +498,11 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 				Sig  string
 			}
 			type verifiedToolPart struct {
-				Name string
-				Args map[string]any
-				Sig  string
+				Name       string
+				Args       map[string]any
+				Sig        string
+				UpstreamID string
+				BridgeID   string
 			}
 			reasoningVerifiedText := make(map[string]verifiedTextPart)
 			reasoningVerifiedTools := make(map[string]verifiedToolPart)
@@ -510,12 +520,41 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 										reasoningVerifiedText[p.OutputItemID] = vp
 									}
 								} else if p.Kind == PartKindToolCall {
-									tp := verifiedToolPart{Name: p.ToolName, Args: p.Args, Sig: p.ThoughtSignature}
+									tp := verifiedToolPart{
+										Name:       p.ToolName,
+										Args:       p.Args,
+										Sig:        p.ThoughtSignature,
+										UpstreamID: p.UpstreamID,
+										BridgeID:   p.CallID,
+									}
 									if p.CallID != "" {
 										reasoningVerifiedTools[p.CallID] = tp
 									}
 									if p.OutputItemID != "" {
 										reasoningVerifiedTools[p.OutputItemID] = tp
+									}
+									if p.CallID != "" && p.OutputItemID != "" {
+										reasoningVerifiedTools[p.CallID+"_"+p.OutputItemID] = tp
+									}
+									if sigCache != nil {
+										rec := &upstream.NativeToolRecord{
+											BridgeCallID:     p.CallID,
+											OutputItemID:     p.OutputItemID,
+											UpstreamID:       p.UpstreamID,
+											ToolName:         p.ToolName,
+											Args:             p.Args,
+											ThoughtSignature: p.ThoughtSignature,
+											Model:            state.Model,
+											TurnID:           state.TurnID,
+										}
+										var aliases []string
+										if p.OutputItemID != "" {
+											aliases = append(aliases, p.OutputItemID)
+											if p.CallID != "" {
+												aliases = append(aliases, p.CallID+"_"+p.OutputItemID)
+											}
+										}
+										sigCache.PutToolRecord(rec, aliases...)
 									}
 								}
 							}
@@ -549,6 +588,11 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 						vtp = &p
 					}
 				}
+				if vtp == nil && cID != "" && itID != "" {
+					if p, ok := reasoningVerifiedTools[cID+"_"+itID]; ok {
+						vtp = &p
+					}
+				}
 				if vtp != nil {
 					hasCarrier = true
 					if vtp.Name != name || !equalToolArgs(vtp.Args, args) {
@@ -559,23 +603,21 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 
 				// If not in carrier, check sigCache
 				if sigCache != nil {
-					cachedName := ""
-					var cachedArgs map[string]any
+					var rec *upstream.NativeToolRecord
 					if cID != "" {
-						cachedName = sigCache.GetToolName(cID)
-						cachedArgs = sigCache.GetToolArgs(cID)
+						rec, _ = sigCache.GetToolRecord(cID)
 					}
-					if cachedName == "" && itID != "" {
-						cachedName = sigCache.GetToolName(itID)
+					if rec == nil && itID != "" {
+						rec, _ = sigCache.GetToolRecord(itID)
 					}
-					if cachedArgs == nil && itID != "" {
-						cachedArgs = sigCache.GetToolArgs(itID)
+					if rec == nil && cID != "" && itID != "" {
+						rec, _ = sigCache.GetToolRecord(cID + "_" + itID)
 					}
-					if cachedName != "" && cachedName != name {
-						return true, "", false
-					}
-					if cachedArgs != nil && !equalToolArgs(cachedArgs, args) {
-						return true, "", false
+					if rec != nil {
+						if rec.ToolName != name || !equalToolArgs(rec.Args, args) {
+							return true, "", false
+						}
+						return false, rec.ThoughtSignature, false
 					}
 				}
 				return false, "", false
@@ -628,15 +670,18 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 							}
 							if sig == "" && sigCache != nil {
 								if cID != "" {
-									sig = sigCache.GetToolSignature(cID)
-									if sig == "" {
-										sig = sigCache.GetMessageSignature(cID)
+									if rec, ok := sigCache.GetToolRecord(cID); ok {
+										sig = rec.ThoughtSignature
 									}
 								}
 								if sig == "" && itID != "" {
-									sig = sigCache.GetToolSignature(itID)
-									if sig == "" {
-										sig = sigCache.GetMessageSignature(itID)
+									if rec, ok := sigCache.GetToolRecord(itID); ok {
+										sig = rec.ThoughtSignature
+									}
+								}
+								if sig == "" && cID != "" && itID != "" {
+									if rec, ok := sigCache.GetToolRecord(cID + "_" + itID); ok {
+										sig = rec.ThoughtSignature
 									}
 								}
 							}
@@ -704,6 +749,17 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 					if canonicalID == "" {
 						canonicalID = itemID
 					}
+
+					// Verify identity conflict: call_id and id must not resolve to different native records
+					if callID != "" && itemID != "" && sigCache != nil {
+						recByCall, hasRecCall := sigCache.GetToolRecord(callID)
+						recByID, hasRecID := sigCache.GetToolRecord(itemID)
+						if hasRecCall && hasRecID && recByCall.BridgeCallID != recByID.BridgeCallID {
+							return nil, fmt.Errorf("tool call identity conflict: call_id %q and id %q resolve to different native records (%s vs %s)",
+								callID, itemID, recByCall.BridgeCallID, recByID.BridgeCallID)
+						}
+					}
+
 					ev := ProvenanceEvidence{
 						CallID:               callID,
 						ItemID:               itemID,
@@ -725,6 +781,11 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 							vtp = &p
 						}
 					}
+					if vtp == nil && callID != "" && itemID != "" {
+						if p, ok := reasoningVerifiedTools[callID+"_"+itemID]; ok {
+							vtp = &p
+						}
+					}
 					if vtp != nil {
 						ev.HasCarrier = true
 						if vtp.Name != name || !equalToolArgs(vtp.Args, args) {
@@ -734,51 +795,26 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 						}
 					}
 
+					var rec *upstream.NativeToolRecord
 					if sigCache != nil {
-						cachedName := ""
-						var cachedArgs map[string]any
 						if callID != "" {
-							cachedName = sigCache.GetToolName(callID)
-							cachedArgs = sigCache.GetToolArgs(callID)
+							rec, _ = sigCache.GetToolRecord(callID)
 						}
-						if cachedName == "" && itemID != "" {
-							cachedName = sigCache.GetToolName(itemID)
+						if rec == nil && itemID != "" {
+							rec, _ = sigCache.GetToolRecord(itemID)
 						}
-						if cachedArgs == nil && itemID != "" {
-							cachedArgs = sigCache.GetToolArgs(itemID)
+						if rec == nil && callID != "" && itemID != "" {
+							rec, _ = sigCache.GetToolRecord(callID + "_" + itemID)
 						}
-						if cachedName != "" || cachedArgs != nil {
-							ev.HasCache = true
-							if (cachedName != "" && cachedName != name) || (cachedArgs != nil && !equalToolArgs(cachedArgs, args)) {
+					}
+					if rec != nil {
+						ev.HasCache = true
+						if (rec.ToolName != "" && rec.ToolName != name) || (rec.Args != nil && !equalToolArgs(rec.Args, args)) {
+							if !ev.HasCarrier || ev.CarrierMismatch {
 								ev.CacheMismatch = true
-							} else {
-								sig := sigCache.GetToolSignature(callID)
-								if sig == "" && itemID != "" {
-									sig = sigCache.GetToolSignature(itemID)
-								}
-								if sig == "" && callID != "" {
-									sig = sigCache.GetMessageSignature(callID)
-								}
-								if sig == "" && itemID != "" {
-									sig = sigCache.GetMessageSignature(itemID)
-								}
-								ev.CacheSig = sig
 							}
 						} else {
-							sig := sigCache.GetToolSignature(callID)
-							if sig == "" && itemID != "" {
-								sig = sigCache.GetToolSignature(itemID)
-							}
-							if sig == "" && callID != "" {
-								sig = sigCache.GetMessageSignature(callID)
-							}
-							if sig == "" && itemID != "" {
-								sig = sigCache.GetMessageSignature(itemID)
-							}
-							if sig != "" {
-								ev.HasCache = true
-								ev.CacheSig = sig
-							}
+							ev.CacheSig = rec.ThoughtSignature
 						}
 					}
 
@@ -807,9 +843,8 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 									leadSig = lp.Sig
 								}
 								if leadSig == "" && sigCache != nil {
-									leadSig = sigCache.GetToolSignature(leadCallID)
-									if leadSig == "" {
-										leadSig = sigCache.GetMessageSignature(leadCallID)
+									if leadRec, ok := sigCache.GetToolRecord(leadCallID); ok {
+										leadSig = leadRec.ThoughtSignature
 									}
 								}
 								ev.SiblingLeadSig = leadSig
@@ -824,6 +859,13 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 						return nil, err
 					}
 					callPart.ThoughtSignature = res.ThoughtSignature
+					outboundID := canonicalID
+					if vtp != nil && vtp.UpstreamID != "" {
+						outboundID = vtp.UpstreamID
+					} else if rec != nil && rec.UpstreamID != "" {
+						outboundID = rec.UpstreamID
+					}
+					callPart.FunctionCall.ID = outboundID
 					rawContents = append(rawContents, upstream.Content{
 						Role:  "model",
 						Parts: []upstream.Part{callPart},
@@ -842,14 +884,28 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 					if canonicalID == "" {
 						canonicalID = callID
 					}
+					respID := canonicalID
+					if p, ok := reasoningVerifiedTools[canonicalID]; ok && p.UpstreamID != "" {
+						respID = p.UpstreamID
+					} else if p, ok := reasoningVerifiedTools[callID]; ok && p.UpstreamID != "" {
+						respID = p.UpstreamID
+					} else if sigCache != nil {
+						if r, ok := sigCache.GetToolRecord(canonicalID); ok && r.UpstreamID != "" {
+							respID = r.UpstreamID
+						} else if r, ok := sigCache.GetToolRecord(callID); ok && r.UpstreamID != "" {
+							respID = r.UpstreamID
+						}
+					}
+
 					funcName := callNames[canonicalID]
 					if funcName == "" {
 						funcName = callNames[callID]
 					}
 					if funcName == "" && sigCache != nil {
-						funcName = sigCache.GetToolName(canonicalID)
-						if funcName == "" && callID != canonicalID {
-							funcName = sigCache.GetToolName(callID)
+						if r, ok := sigCache.GetToolRecord(canonicalID); ok && r.ToolName != "" {
+							funcName = r.ToolName
+						} else if r, ok := sigCache.GetToolRecord(callID); ok && r.ToolName != "" {
+							funcName = r.ToolName
 						}
 					}
 					if funcName == "" {
@@ -862,7 +918,7 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 								FunctionResponse: &upstream.FunctionResponse{
 									Name:     funcName,
 									Response: respObj,
-									ID:       canonicalID,
+									ID:       respID,
 								},
 							},
 						},

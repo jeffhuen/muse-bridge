@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"fmt"
+	"os"
 	"sync"
 	"testing"
 )
@@ -129,5 +130,120 @@ func TestSignatureCacheAmbiguityDetection(t *testing.T) {
 	// Must be marked ambiguous: returns empty so client omits rather than guessing wrong
 	if got := c.GetContextSignature("identical_context:same_text"); got != "" {
 		t.Errorf("ambiguous key returned %q, want empty string", got)
+	}
+}
+
+func TestNativeToolRecordAndAliases(t *testing.T) {
+	c := NewSignatureCache(10)
+
+	callID := "call_0123456789abcdef01234567"
+	itemID := "fc_abcdef0123456789abcdef01"
+	piAlias := callID + "_" + itemID
+
+	origArgs := map[string]any{"cmd": "git status", "timeout": 30}
+	rec := &NativeToolRecord{
+		BridgeCallID:     callID,
+		OutputItemID:     itemID,
+		UpstreamID:       "call_987397",
+		ToolName:         "exec_command",
+		Args:             origArgs,
+		ThoughtSignature: "sig_atomic_test",
+		Model:            "gemini-3.8-flash-high",
+		TurnID:           "turn_xyz",
+	}
+
+	c.PutToolRecord(rec, itemID, piAlias)
+
+	// Mutate origArgs to verify atomic cloning
+	origArgs["cmd"] = "rm -rf /"
+
+	// Look up by BridgeCallID
+	rec1, ok := c.GetToolRecord(callID)
+	if !ok || rec1 == nil {
+		t.Fatalf("expected record for callID, got not found")
+	}
+	if rec1.ToolName != "exec_command" {
+		t.Errorf("got ToolName %q, want exec_command", rec1.ToolName)
+	}
+	if rec1.Args["cmd"] != "git status" {
+		t.Errorf("expected cloned args not mutated, got %v", rec1.Args["cmd"])
+	}
+
+	// Look up by itemID alias
+	rec2, ok := c.GetToolRecord(itemID)
+	if !ok || rec2 == nil {
+		t.Fatalf("expected record for itemID alias, got not found")
+	}
+	if rec2.BridgeCallID != callID || rec2.ThoughtSignature != "sig_atomic_test" {
+		t.Errorf("itemID alias did not resolve to canonical record: %+v", rec2)
+	}
+
+	// Look up by Pi composite alias (57 chars)
+	rec3, ok := c.GetToolRecord(piAlias)
+	if !ok || rec3 == nil {
+		t.Fatalf("expected record for piAlias, got not found")
+	}
+	if rec3.BridgeCallID != callID || rec3.UpstreamID != "call_987397" {
+		t.Errorf("piAlias did not resolve to canonical record: %+v", rec3)
+	}
+
+	// Sibling tracking with aliases
+	otherCallID := "call_other_sibling_99"
+	otherRec := &NativeToolRecord{
+		BridgeCallID:     otherCallID,
+		ToolName:         "read_file",
+		ThoughtSignature: "sig_other",
+	}
+	c.PutToolRecord(otherRec, "fc_other_alias")
+
+	c.RecordTurnSiblings(piAlias, []string{"fc_other_alias"})
+
+	if !c.IsVerifiedSibling(callID, otherCallID) {
+		t.Errorf("expected callID and otherCallID to be verified siblings")
+	}
+	if !c.IsVerifiedSibling(piAlias, otherCallID) {
+		t.Errorf("expected piAlias and otherCallID to be verified siblings")
+	}
+	if !c.IsVerifiedSibling(itemID, "fc_other_alias") {
+		t.Errorf("expected itemID and fc_other_alias to be verified siblings")
+	}
+}
+
+func TestLegacyV1CacheSnapshotMigration(t *testing.T) {
+	dir := t.TempDir()
+	legacyFile := dir + "/legacy_signatures.json"
+
+	// Construct legacy v0/v1 JSON with tool_sigs, tool_names, tool_args
+	legacyJSON := `{
+		"tool_sigs": {"call_legacy_1": "sig_leg_1"},
+		"tool_names": {"call_legacy_1": "bash"},
+		"tool_args": {"call_legacy_1": {"flag": "-la"}},
+		"last_sig": "sig_leg_1"
+	}`
+
+	if err := os.WriteFile(legacyFile, []byte(legacyJSON), 0600); err != nil {
+		t.Fatalf("failed to write legacy snapshot: %v", err)
+	}
+
+	c := NewSignatureCache(10)
+	if err := c.LoadFromFile(legacyFile); err != nil {
+		t.Fatalf("LoadFromFile failed on legacy snapshot: %v", err)
+	}
+
+	rec, ok := c.GetToolRecord("call_legacy_1")
+	if !ok || rec == nil {
+		t.Fatalf("expected legacy record to be loaded, got not found")
+	}
+	if !rec.IsLegacy {
+		t.Errorf("expected IsLegacy to be true for migrated record")
+	}
+	if rec.ToolName != "bash" {
+		t.Errorf("got ToolName %q, want bash", rec.ToolName)
+	}
+	if rec.ThoughtSignature != "sig_leg_1" {
+		t.Errorf("got ThoughtSignature %q, want sig_leg_1", rec.ThoughtSignature)
+	}
+	if rec.UpstreamID != "" || rec.Model != "" || rec.TurnID != "" {
+		t.Errorf("migrated record should not invent metadata: %+v", rec)
 	}
 }

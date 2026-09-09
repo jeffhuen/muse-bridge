@@ -10,19 +10,55 @@ import (
 	"time"
 )
 
+// NativeToolRecord stores complete native turn state atomically.
+type NativeToolRecord struct {
+	BridgeCallID     string         `json:"call_id"`
+	OutputItemID     string         `json:"item_id,omitempty"`
+	UpstreamID       string         `json:"upstream_id,omitempty"`
+	ToolName         string         `json:"tool_name"`
+	Args             map[string]any `json:"args,omitempty"`
+	ThoughtSignature string         `json:"sig,omitempty"`
+	Model            string         `json:"model,omitempty"`
+	TurnID           string         `json:"turn_id,omitempty"`
+	IsLegacy         bool           `json:"is_legacy,omitempty"`
+}
+
+func cloneArgs(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return nil
+	}
+	var cloned map[string]any
+	if err := json.Unmarshal(raw, &cloned); err != nil {
+		return nil
+	}
+	return cloned
+}
+
+func (r *NativeToolRecord) Clone() *NativeToolRecord {
+	if r == nil {
+		return nil
+	}
+	cp := *r
+	cp.Args = cloneArgs(r.Args)
+	return &cp
+}
+
 // SignatureCache preserves cryptographic thought signatures and function metadata
 // attached to model outputs across multi-turn conversation steps.
 type SignatureCache struct {
 	mu           sync.RWMutex
-	toolSigs     map[string]string          // tool_call_id / item_id -> thoughtSignature
-	toolNames    map[string]string          // tool_call_id / item_id -> functionName
-	toolArgs     map[string]map[string]any  // tool_call_id / item_id -> function arguments
-	textSigs     map[string]string          // text -> thoughtSignature
-	msgSigs      map[string]string          // msg_id / item_id -> thoughtSignature
-	contextSigs  map[string]string          // context_key -> thoughtSignature
-	ambiguous    map[string]bool            // context_key -> true if multiple signatures observed
-	turnSiblings map[string]map[string]bool // lead_call_id -> set of sibling call IDs
-	lastSig      string                     // most recently seen signature
+	records      map[string]*NativeToolRecord // canonical BridgeCallID -> record
+	aliases      map[string]string            // alias (call_id, item_id, pi_composite) -> canonical BridgeCallID
+	textSigs     map[string]string            // text -> thoughtSignature
+	msgSigs      map[string]string            // msg_id / item_id -> thoughtSignature
+	contextSigs  map[string]string            // context_key -> thoughtSignature
+	ambiguous    map[string]bool              // context_key -> true if multiple signatures observed
+	turnSiblings map[string]map[string]bool   // canonical BridgeCallID -> set of sibling canonical BridgeCallIDs
+	lastSig      string                       // most recently seen signature
 	maxSize      int
 	toolOrder    []string
 	textOrder    []string
@@ -38,9 +74,8 @@ func NewSignatureCache(maxSize int) *SignatureCache {
 		maxSize = 2000
 	}
 	return &SignatureCache{
-		toolSigs:     make(map[string]string),
-		toolNames:    make(map[string]string),
-		toolArgs:     make(map[string]map[string]any),
+		records:      make(map[string]*NativeToolRecord),
+		aliases:      make(map[string]string),
 		textSigs:     make(map[string]string),
 		msgSigs:      make(map[string]string),
 		contextSigs:  make(map[string]string),
@@ -109,6 +144,83 @@ func (c *SignatureCache) GetMessageSignature(id string) string {
 	return c.msgSigs[id]
 }
 
+// PutToolRecord registers a native tool record and binds all associated aliases.
+func (c *SignatureCache) PutToolRecord(rec *NativeToolRecord, aliases ...string) {
+	if rec == nil || rec.BridgeCallID == "" {
+		return
+	}
+	c.mu.Lock()
+	if c.records == nil {
+		c.records = make(map[string]*NativeToolRecord)
+	}
+	if c.aliases == nil {
+		c.aliases = make(map[string]string)
+	}
+
+	cloned := rec.Clone()
+	c.records[rec.BridgeCallID] = cloned
+
+	isNew := true
+	for _, id := range c.toolOrder {
+		if id == rec.BridgeCallID {
+			isNew = false
+			break
+		}
+	}
+	if isNew {
+		if len(c.toolOrder) >= c.maxSize {
+			oldest := c.toolOrder[0]
+			c.toolOrder = c.toolOrder[1:]
+			delete(c.records, oldest)
+			for a, target := range c.aliases {
+				if target == oldest {
+					delete(c.aliases, a)
+				}
+			}
+		}
+		c.toolOrder = append(c.toolOrder, rec.BridgeCallID)
+	}
+
+	c.aliases[rec.BridgeCallID] = rec.BridgeCallID
+	for _, a := range aliases {
+		if a != "" {
+			c.aliases[a] = rec.BridgeCallID
+		}
+	}
+
+	if rec.ThoughtSignature != "" {
+		c.lastSig = rec.ThoughtSignature
+	}
+	c.mu.Unlock()
+
+	if rec.ThoughtSignature != "" {
+		c.triggerSave()
+	}
+}
+
+// GetToolRecord retrieves the atomic native tool record by alias or callID.
+func (c *SignatureCache) GetToolRecord(alias string) (*NativeToolRecord, bool) {
+	if alias == "" {
+		return nil, false
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	canonicalID := alias
+	if c.aliases != nil {
+		if id, ok := c.aliases[alias]; ok && id != "" {
+			canonicalID = id
+		}
+	}
+
+	if c.records != nil {
+		if rec, ok := c.records[canonicalID]; ok && rec != nil {
+			return rec.Clone(), true
+		}
+	}
+	return nil, false
+}
+
 // PutToolSignature records the signature associated with a tool call ID.
 func (c *SignatureCache) PutToolSignature(callID, sig string) {
 	c.PutToolDetails(callID, "", nil, sig)
@@ -124,67 +236,46 @@ func (c *SignatureCache) PutToolDetails(callID, name string, args map[string]any
 	if callID == "" {
 		return
 	}
-	c.mu.Lock()
-	if _, exists := c.toolSigs[callID]; !exists {
-		if len(c.toolOrder) >= c.maxSize {
-			oldest := c.toolOrder[0]
-			c.toolOrder = c.toolOrder[1:]
-			delete(c.toolSigs, oldest)
-			delete(c.toolNames, oldest)
-			delete(c.toolArgs, oldest)
-		}
-		c.toolOrder = append(c.toolOrder, callID)
+	rec := &NativeToolRecord{
+		BridgeCallID:     callID,
+		ToolName:         name,
+		Args:             args,
+		ThoughtSignature: sig,
 	}
-	if sig != "" {
-		c.toolSigs[callID] = sig
-		c.lastSig = sig
-	}
-	if name != "" {
-		c.toolNames[callID] = name
-	}
-	if args != nil {
-		if c.toolArgs == nil {
-			c.toolArgs = make(map[string]map[string]any)
-		}
-		c.toolArgs[callID] = args
-	}
-	c.mu.Unlock()
-	if sig != "" {
-		c.triggerSave()
-	}
+	c.PutToolRecord(rec, callID)
 }
 
-// GetToolSignature retrieves the signature associated with a tool call ID.
+// GetToolSignature retrieves the signature associated with a tool call ID or alias.
 func (c *SignatureCache) GetToolSignature(callID string) string {
-	if callID == "" {
-		return ""
+	if rec, ok := c.GetToolRecord(callID); ok {
+		return rec.ThoughtSignature
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.toolSigs[callID]
+	return ""
 }
 
-// GetToolName retrieves the function name associated with a tool call ID.
+// GetToolName retrieves the function name associated with a tool call ID or alias.
 func (c *SignatureCache) GetToolName(callID string) string {
-	if callID == "" {
-		return ""
+	if rec, ok := c.GetToolRecord(callID); ok {
+		return rec.ToolName
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.toolNames[callID]
+	return ""
 }
 
-// GetToolArgs retrieves the function arguments associated with a tool call ID.
+// GetToolArgs retrieves the function arguments associated with a tool call ID or alias.
 func (c *SignatureCache) GetToolArgs(callID string) map[string]any {
-	if callID == "" {
-		return nil
+	if rec, ok := c.GetToolRecord(callID); ok {
+		return rec.Args
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	if c.toolArgs == nil {
-		return nil
+	return nil
+}
+
+func (c *SignatureCache) resolveCanonicalIDLocked(alias string) string {
+	if c.aliases != nil {
+		if id, ok := c.aliases[alias]; ok && id != "" {
+			return id
+		}
 	}
-	return c.toolArgs[callID]
+	return alias
 }
 
 // RecordTurnSiblings records that siblingCallIDs were issued in the same turn as leadCallID.
@@ -193,15 +284,19 @@ func (c *SignatureCache) RecordTurnSiblings(leadCallID string, siblingCallIDs []
 		return
 	}
 	c.mu.Lock()
+	leadCanon := c.resolveCanonicalIDLocked(leadCallID)
 	if c.turnSiblings == nil {
 		c.turnSiblings = make(map[string]map[string]bool)
 	}
-	if c.turnSiblings[leadCallID] == nil {
-		c.turnSiblings[leadCallID] = make(map[string]bool)
+	if c.turnSiblings[leadCanon] == nil {
+		c.turnSiblings[leadCanon] = make(map[string]bool)
 	}
 	for _, id := range siblingCallIDs {
-		if id != "" && id != leadCallID {
-			c.turnSiblings[leadCallID][id] = true
+		if id != "" {
+			sibCanon := c.resolveCanonicalIDLocked(id)
+			if sibCanon != leadCanon {
+				c.turnSiblings[leadCanon][sibCanon] = true
+			}
 		}
 	}
 	c.mu.Unlock()
@@ -210,7 +305,7 @@ func (c *SignatureCache) RecordTurnSiblings(leadCallID string, siblingCallIDs []
 
 // IsVerifiedSibling checks if siblingCallID was recorded as an emitted turn sibling of leadCallID.
 func (c *SignatureCache) IsVerifiedSibling(leadCallID, siblingCallID string) bool {
-	if leadCallID == "" || siblingCallID == "" || leadCallID == siblingCallID {
+	if leadCallID == "" || siblingCallID == "" {
 		return false
 	}
 	c.mu.RLock()
@@ -218,10 +313,15 @@ func (c *SignatureCache) IsVerifiedSibling(leadCallID, siblingCallID string) boo
 	if c.turnSiblings == nil {
 		return false
 	}
-	if siblings, ok := c.turnSiblings[leadCallID]; ok && siblings[siblingCallID] {
+	leadCanon := c.resolveCanonicalIDLocked(leadCallID)
+	sibCanon := c.resolveCanonicalIDLocked(siblingCallID)
+	if leadCanon == sibCanon {
+		return false
+	}
+	if siblings, ok := c.turnSiblings[leadCanon]; ok && siblings[sibCanon] {
 		return true
 	}
-	if siblings, ok := c.turnSiblings[siblingCallID]; ok && siblings[leadCallID] {
+	if siblings, ok := c.turnSiblings[sibCanon]; ok && siblings[leadCanon] {
 		return true
 	}
 	return false
@@ -321,15 +421,20 @@ func (c *SignatureCache) GetContextSignature(contextKey string) string {
 }
 
 type persistedCacheData struct {
-	ToolSigs     map[string]string          `json:"tool_sigs"`
-	ToolNames    map[string]string          `json:"tool_names"`
-	ToolArgs     map[string]map[string]any  `json:"tool_args,omitempty"`
-	TextSigs     map[string]string          `json:"text_sigs"`
-	MsgSigs      map[string]string          `json:"msg_sigs"`
-	ContextSigs  map[string]string          `json:"context_sigs,omitempty"`
-	Ambiguous    map[string]bool            `json:"ambiguous,omitempty"`
-	TurnSiblings map[string][]string        `json:"turn_siblings,omitempty"`
-	LastSig      string                     `json:"last_sig"`
+	Version      int                          `json:"v,omitempty"`
+	Records      map[string]*NativeToolRecord `json:"records,omitempty"`
+	Aliases      map[string]string            `json:"aliases,omitempty"`
+	TextSigs     map[string]string            `json:"text_sigs,omitempty"`
+	MsgSigs      map[string]string            `json:"msg_sigs,omitempty"`
+	ContextSigs  map[string]string            `json:"context_sigs,omitempty"`
+	Ambiguous    map[string]bool              `json:"ambiguous,omitempty"`
+	TurnSiblings map[string][]string          `json:"turn_siblings,omitempty"`
+	LastSig      string                       `json:"last_sig,omitempty"`
+
+	// Legacy fields (v0/v1) for backward compatibility:
+	ToolSigs  map[string]string         `json:"tool_sigs,omitempty"`
+	ToolNames map[string]string         `json:"tool_names,omitempty"`
+	ToolArgs  map[string]map[string]any `json:"tool_args,omitempty"`
 }
 
 // SaveToFile saves the cache snapshot to disk atomically.
@@ -339,9 +444,9 @@ func (c *SignatureCache) SaveToFile(filePath string) error {
 	}
 	c.mu.RLock()
 	data := persistedCacheData{
-		ToolSigs:     make(map[string]string, len(c.toolSigs)),
-		ToolNames:    make(map[string]string, len(c.toolNames)),
-		ToolArgs:     make(map[string]map[string]any, len(c.toolArgs)),
+		Version:      2,
+		Records:      make(map[string]*NativeToolRecord, len(c.records)),
+		Aliases:      make(map[string]string, len(c.aliases)),
 		TextSigs:     make(map[string]string, len(c.textSigs)),
 		MsgSigs:      make(map[string]string, len(c.msgSigs)),
 		ContextSigs:  make(map[string]string, len(c.contextSigs)),
@@ -349,14 +454,13 @@ func (c *SignatureCache) SaveToFile(filePath string) error {
 		TurnSiblings: make(map[string][]string, len(c.turnSiblings)),
 		LastSig:      c.lastSig,
 	}
-	for k, v := range c.toolSigs {
-		data.ToolSigs[k] = v
+	for k, v := range c.records {
+		if v != nil {
+			data.Records[k] = v.Clone()
+		}
 	}
-	for k, v := range c.toolNames {
-		data.ToolNames[k] = v
-	}
-	for k, v := range c.toolArgs {
-		data.ToolArgs[k] = v
+	for k, v := range c.aliases {
+		data.Aliases[k] = v
 	}
 	for k, v := range c.textSigs {
 		data.TextSigs[k] = v
@@ -402,19 +506,40 @@ func (c *SignatureCache) LoadFromFile(filePath string) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for k, v := range data.ToolSigs {
-		c.toolSigs[k] = v
-		c.toolOrder = append(c.toolOrder, k)
+
+	if c.records == nil {
+		c.records = make(map[string]*NativeToolRecord)
 	}
-	for k, v := range data.ToolNames {
-		c.toolNames[k] = v
+	if c.aliases == nil {
+		c.aliases = make(map[string]string)
 	}
-	if c.toolArgs == nil {
-		c.toolArgs = make(map[string]map[string]any)
+
+	if data.Version >= 2 && len(data.Records) > 0 {
+		for k, rec := range data.Records {
+			if rec != nil {
+				c.records[k] = rec.Clone()
+				c.toolOrder = append(c.toolOrder, k)
+			}
+		}
+		for a, target := range data.Aliases {
+			c.aliases[a] = target
+		}
+	} else if len(data.ToolSigs) > 0 {
+		// Visibly legacy migration: do not invent upstream IDs, model ownership, or turn IDs
+		for k, sig := range data.ToolSigs {
+			rec := &NativeToolRecord{
+				BridgeCallID:     k,
+				ToolName:         data.ToolNames[k],
+				Args:             cloneArgs(data.ToolArgs[k]),
+				ThoughtSignature: sig,
+				IsLegacy:         true,
+			}
+			c.records[k] = rec
+			c.aliases[k] = k
+			c.toolOrder = append(c.toolOrder, k)
+		}
 	}
-	for k, v := range data.ToolArgs {
-		c.toolArgs[k] = v
-	}
+
 	for k, v := range data.TextSigs {
 		c.textSigs[k] = v
 		c.textOrder = append(c.textOrder, k)
