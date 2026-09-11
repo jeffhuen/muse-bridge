@@ -1,6 +1,7 @@
 package protocols
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -1190,6 +1191,33 @@ func ChatContextKey(prefixHash, text string) string {
 }
 
 // ComputeResponsesContextHash creates a deterministic hash of the responses context preceding a turn.
+// canonicalizeJSONForHash re-serializes JSON so that formatting alone cannot
+// change a context hash. The two callers spell the same logical history
+// differently: the handler passes the client's raw request bytes, while the
+// replay lookup passes a re-marshaled item prefix with compact separators and
+// sorted keys. Hashing those spellings directly made the lookup miss whenever
+// the client sent pretty-printed or differently ordered JSON, silently dropping
+// an assistant thought signature that was in fact cached.
+//
+// Numbers decode through json.Number so canonicalizing cannot round a large
+// integer into float64 and collide two distinct histories.
+func canonicalizeJSONForHash(raw json.RawMessage) []byte {
+	if len(raw) == 0 {
+		return raw
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var decoded any
+	if err := dec.Decode(&decoded); err != nil {
+		return raw
+	}
+	canonical, err := json.Marshal(decoded)
+	if err != nil {
+		return raw
+	}
+	return canonical
+}
+
 func ComputeResponsesContextHash(input json.RawMessage, instructions string, model string, tools []ToolDefinition) string {
 	if len(input) == 0 && instructions == "" && model == "" && len(tools) == 0 {
 		return ""
@@ -1213,7 +1241,7 @@ func ComputeResponsesContextHash(input json.RawMessage, instructions string, mod
 	}
 	if len(input) > 0 {
 		h.Write([]byte("input:"))
-		h.Write(input)
+		h.Write(canonicalizeJSONForHash(input))
 		h.Write([]byte("\n"))
 	}
 	return hex.EncodeToString(h.Sum(nil))
