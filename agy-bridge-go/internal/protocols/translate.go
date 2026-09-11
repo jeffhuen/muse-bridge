@@ -318,10 +318,9 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 		case "tool":
 			// Tool output in Gemini is sent under role "user" with functionResponse
 			text := extractMessageText(m.Content)
-			var respObj map[string]any
-			if err := json.Unmarshal([]byte(text), &respObj); err != nil {
-				respObj = map[string]any{"response": text}
-			}
+			// Keep tool text opaque: parsing JSON would turn literal $ref keys
+			// into Gemini attachment references and can round large numbers.
+			respObj := map[string]any{"response": text}
 			respID := m.ToolCallID
 			funcName := m.Name
 			if sigCache != nil && m.ToolCallID != "" {
@@ -958,10 +957,9 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 				if itemType == "function_call_output" {
 					callID, _ := item["call_id"].(string)
 					outputStr, _ := item["output"].(string)
-					var respObj map[string]any
-					if err := json.Unmarshal([]byte(outputStr), &respObj); err != nil {
-						respObj = map[string]any{"response": outputStr}
-					}
+					// Match Chat's lossless text envelope; tool-result JSON is data,
+					// not Gemini function-response metadata.
+					respObj := map[string]any{"response": outputStr}
 					canonicalID := callAlias[callID]
 					if canonicalID == "" {
 						canonicalID = callID
@@ -1470,4 +1468,3 @@ func validateChatToolExchange(messages []ChatMessage, sigCache ...*upstream.Sign
 	}
 	return nil
 }
-
