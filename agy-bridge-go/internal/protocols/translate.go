@@ -63,7 +63,6 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 		resolvedModel = config.DefaultModel
 	}
 
-
 	predReq := &upstream.PredictionRequest{
 		Project:   "aicode-consumers",
 		RequestID: RandomID("req"),
@@ -100,7 +99,7 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 					fds = append(fds, upstream.FunctionDeclaration{
 						Name:        fnName,
 						Description: t.FunctionDescription(),
-						Parameters:  t.FunctionParameters(),
+						Parameters:  SanitizeToolSchema(t.FunctionParameters()),
 					})
 				}
 			case "namespace":
@@ -116,7 +115,7 @@ func ConvertChatToPrediction(req *ChatRequest, sigCache *upstream.SignatureCache
 							fds = append(fds, upstream.FunctionDeclaration{
 								Name:        declName,
 								Description: sub.FunctionDescription(),
-								Parameters:  sub.FunctionParameters(),
+								Parameters:  SanitizeToolSchema(sub.FunctionParameters()),
 							})
 						}
 					}
@@ -422,7 +421,7 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 					fds = append(fds, upstream.FunctionDeclaration{
 						Name:        fnName,
 						Description: t.FunctionDescription(),
-						Parameters:  t.FunctionParameters(),
+						Parameters:  SanitizeToolSchema(t.FunctionParameters()),
 					})
 				}
 			case "namespace":
@@ -438,7 +437,7 @@ func ConvertResponsesToPrediction(req *ResponsesRequest, sigCache *upstream.Sign
 							fds = append(fds, upstream.FunctionDeclaration{
 								Name:        declName,
 								Description: sub.FunctionDescription(),
-								Parameters:  sub.FunctionParameters(),
+								Parameters:  SanitizeToolSchema(sub.FunctionParameters()),
 							})
 						}
 					}
