@@ -51,6 +51,9 @@ func TestResponses(t *testing.T) {
 	}
 }
 
+// Regression test: Meta's /v1/responses rejects tools missing "parameters"
+// with HTTP 400 "`tools[i]` did not match any supported type".
+// Responses must supply {"type":"object"} when parameters is omitted or null.
 func TestResponsesSuppliesMissingToolParameters(t *testing.T) {
 	in := `{"tools":[{"type":"function","name":"no_params"},{"type":"function","name":"null_params","parameters":null},{"type":"function","name":"has_params","parameters":{"type":"object"}}]}`
 	out := decode(t, Responses([]byte(in), false))

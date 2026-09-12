@@ -382,6 +382,9 @@ class Handler(BaseHTTPRequestHandler):
                 reasoning = payload.get("reasoning")
                 if isinstance(reasoning, dict) and reasoning.get("effort") in (None, "none"):
                     payload.pop("reasoning", None)
+                # Meta's /v1/responses validator requires 'parameters' on type="function",
+                # rejecting omitted/null with HTTP 400 ("`tools[i]` did not match any supported type").
+                # Ensure input-less tools (e.g. pi custom tools like cbmem) have a default object schema.
                 tools = payload.get("tools")
                 if isinstance(tools, list):
                     for t in tools:

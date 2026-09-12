@@ -155,7 +155,8 @@ Portability notes:
 Ported one-to-one: device login, mint + 20h cache, direct-key fallback,
 conditional 401 invalidate-and-retry-once, `/v1` path prefixing with
 bare-path rewriting, 25MB body cap, 64-flight bound,
-`prompt_cache_retention: 24h`, reasoning-effort stripping, error JSON
+`prompt_cache_retention: 24h`, reasoning-effort stripping, parameterless tool
+schema defaulting (`{"type":"object"}`), error JSON passthrough with snippets,
 passthrough with snippets, `Retry-After` forwarding, chunked streaming.
 
 Divergences, all intentional:

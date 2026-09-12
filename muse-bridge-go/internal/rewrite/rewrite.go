@@ -17,8 +17,9 @@ func Decode(data []byte, v any) error {
 	return dec.Decode(v)
 }
 
-// Responses defaults prompt_cache_retention to 24h and drops reasoning
-// blocks Meta rejects (missing, null, or "none" effort). Invalid JSON
+// Responses defaults prompt_cache_retention to 24h, drops reasoning
+// blocks Meta rejects (missing, null, or "none" effort), and supplies
+// empty object schemas for parameterless function tools. Invalid JSON
 // passes through untouched, matching bridge.py. When debug is true the
 // model and original reasoning are logged.
 func Responses(body []byte, debug bool) []byte {
@@ -38,6 +39,12 @@ func Responses(body []byte, debug bool) []byte {
 			delete(payload, "reasoning")
 		}
 	}
+	// Meta's /v1/responses schema validator requires a 'parameters' object on
+	// every tool where type="function", failing with HTTP 400
+	// ("`tools[i]` did not match any supported type") if omitted or null.
+	// Clients and extensions (e.g. pi custom tools like cbmem) that register
+	// input-less tools emit {"type":"function","name":"..."} without parameters.
+	// Supply a bare {"type":"object"} so Meta's validator accepts them.
 	if tools, ok := payload["tools"].([]any); ok {
 		for _, raw := range tools {
 			if tool, ok := raw.(map[string]any); ok && tool["type"] == "function" {
