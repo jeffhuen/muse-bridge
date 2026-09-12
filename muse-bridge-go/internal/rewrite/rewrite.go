@@ -38,6 +38,15 @@ func Responses(body []byte, debug bool) []byte {
 			delete(payload, "reasoning")
 		}
 	}
+	if tools, ok := payload["tools"].([]any); ok {
+		for _, raw := range tools {
+			if tool, ok := raw.(map[string]any); ok && tool["type"] == "function" {
+				if params, ok := tool["parameters"]; !ok || params == nil {
+					tool["parameters"] = map[string]any{"type": "object"}
+				}
+			}
+		}
+	}
 	out, err := json.Marshal(payload)
 	if err != nil {
 		return body

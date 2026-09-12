@@ -382,6 +382,11 @@ class Handler(BaseHTTPRequestHandler):
                 reasoning = payload.get("reasoning")
                 if isinstance(reasoning, dict) and reasoning.get("effort") in (None, "none"):
                     payload.pop("reasoning", None)
+                tools = payload.get("tools")
+                if isinstance(tools, list):
+                    for t in tools:
+                        if isinstance(t, dict) and t.get("type") == "function" and not t.get("parameters"):
+                            t["parameters"] = {"type": "object"}
                 body = json.dumps(payload).encode()
             except Exception:
                 pass

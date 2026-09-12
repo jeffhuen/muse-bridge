@@ -51,6 +51,22 @@ func TestResponses(t *testing.T) {
 	}
 }
 
+func TestResponsesSuppliesMissingToolParameters(t *testing.T) {
+	in := `{"tools":[{"type":"function","name":"no_params"},{"type":"function","name":"null_params","parameters":null},{"type":"function","name":"has_params","parameters":{"type":"object"}}]}`
+	out := decode(t, Responses([]byte(in), false))
+	tools := out["tools"].([]any)
+	for i, name := range []string{"no_params", "null_params", "has_params"} {
+		tool := tools[i].(map[string]any)
+		if tool["name"] != name {
+			t.Fatalf("tool[%d] name = %v, want %s", i, tool["name"], name)
+		}
+		params, ok := tool["parameters"].(map[string]any)
+		if !ok || params["type"] != "object" {
+			t.Fatalf("tool[%d] parameters = %v, want {\"type\":\"object\"}", i, tool["parameters"])
+		}
+	}
+}
+
 func TestResponsesInvalidJSONPassthrough(t *testing.T) {
 	in := []byte(`{not json`)
 	if out := Responses(in, false); string(out) != string(in) {
