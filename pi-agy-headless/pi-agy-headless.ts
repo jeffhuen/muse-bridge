@@ -345,7 +345,7 @@ function getEnvToken(): string | null {
   return process.env.ANTIGRAVITY_TOKEN || process.env.AGY_TOKEN || null;
 }
 
-function getKeychainToken(): string | null {
+function getKeychainCredentials(): { token: string; refresh?: string; expires?: number } | null {
   if (process.platform !== "darwin") return null;
   try {
     const out = execSync("security find-generic-password -s gemini -a antigravity -w", {
@@ -356,10 +356,17 @@ function getKeychainToken(): string | null {
     if (!out) return null;
     const raw = out.startsWith("go-keyring-base64:") ? out.slice("go-keyring-base64:".length) : out;
     const cred = JSON.parse(Buffer.from(raw, "base64").toString("utf8"));
-    return cred?.token?.access_token || null;
+    if (cred?.token?.access_token) {
+      return {
+        token: cred.token.access_token,
+        refresh: cred.token.refresh_token,
+        expires: cred.token.expiry ? new Date(cred.token.expiry).getTime() : undefined,
+      };
+    }
   } catch {
     return null;
   }
+  return null;
 }
 
 function getPiAuthStored(): { token: string; refresh?: string; projectId?: string; expires?: number } | null {
@@ -390,9 +397,19 @@ export async function resolveAuthCredentials(): Promise<AuthCredentials | null> 
   }
 
   // 2. Check macOS Keychain
-  const keychainToken = getKeychainToken();
-  if (keychainToken) {
-    return { token: keychainToken, projectId: "aicode-consumers", source: "keychain" };
+  const keychain = getKeychainCredentials();
+  if (keychain) {
+    if (keychain.expires && Date.now() > keychain.expires && keychain.refresh) {
+      try {
+        const refreshed = await refreshAccessToken(keychain.refresh);
+        if (refreshed?.access_token) {
+          return { token: refreshed.access_token, projectId: "aicode-consumers", source: "keychain" };
+        }
+      } catch {
+        // use existing token
+      }
+    }
+    return { token: keychain.token, projectId: "aicode-consumers", source: "keychain" };
   }
 
   // 3. Check Pi auth store
