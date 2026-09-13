@@ -489,13 +489,24 @@ function parsePastedCallback(raw: string, expectedState: string): string {
   return code;
 }
 
+// --- Headless vs Desktop Environment Detection ---
+
+export function isHeadlessEnvironment(): boolean {
+  if (process.env.HEADLESS === "1" || process.env.HEADLESS === "true") return true;
+  if (process.env.SSH_CLIENT || process.env.SSH_TTY || process.env.SSH_CONNECTION) return true;
+  if (process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) return true;
+  if (process.env.CI || fs.existsSync("/.dockerenv") || fs.existsSync("/run/.containerenv")) return true;
+  return false;
+}
+
 // --- Terminal + Loopback Hybrid OAuth Login ---
 
 export async function loginAntigravityHeadless(callbacks: any): Promise<any> {
   const { verifier, challenge } = generatePKCE();
   const state = base64Url(randomBytes(32));
+  const headless = isHeadlessEnvironment();
 
-  // 1. Attempt to start loopback server for desktop environments
+  // 1. Attempt to start loopback server for desktop environments or forwarded ports
   let server: Server | null = null;
   let loopbackCodePromise: Promise<string> = new Promise(() => {});
   let resolveLoopback: ((code: string) => void) | null = null;
@@ -539,20 +550,41 @@ export async function loginAntigravityHeadless(callbacks: any): Promise<any> {
   });
   const fullAuthUrl = `${AUTH_URL}?${authParams.toString()}`;
 
-  // Notify user in UI / terminal
+  // 2. Open browser automatically if running on a desktop with a GUI
+  if (!headless) {
+    try {
+      const openCmd = process.platform === "darwin" ? "open" : process.platform === "win32" ? "start" : "xdg-open";
+      execSync(`${openCmd} "${fullAuthUrl}"`, { stdio: "ignore" });
+    } catch {
+      // ignore opener failure; fallback to manual URL open
+    }
+  }
+
+  // 3. Notify user in UI / terminal with environment-aware instructions
+  const instructions = headless
+    ? "\n" +
+      "===============================================================\n" +
+      " Google Sign-In (Headless / Remote SSH Detected)\n" +
+      "===============================================================\n" +
+      "1. Open this URL on your local browser (phone or laptop):\n\n" +
+      `   ${fullAuthUrl}\n\n` +
+      "2. Sign in and approve Google Cloud Code permissions.\n" +
+      "3. When the browser redirects to http://localhost:51121/...,\n" +
+      "   copy the URL (or 'code=...') from your address bar and paste below:\n" +
+      "===============================================================\n"
+    : "\n" +
+      "===============================================================\n" +
+      " Google Sign-In (Desktop Environment Detected)\n" +
+      "===============================================================\n" +
+      "1. Opening your default browser for Google Sign-In...\n" +
+      `   If it did not open, click/visit: ${fullAuthUrl}\n\n` +
+      "2. Approve permissions. Sign-in will complete automatically.\n" +
+      "   (Or paste the redirected URL below if browser callback is blocked)\n" +
+      "===============================================================\n";
+
   callbacks.onAuth?.({
     url: fullAuthUrl,
-    instructions:
-      "\n" +
-      "===============================================================\n" +
-      " Google Sign-In (Terminal / Headless Friendly)\n" +
-      "===============================================================\n" +
-      "1. Open this URL on any device:\n\n" +
-      `   ${fullAuthUrl}\n\n` +
-      "2. Approve permissions.\n" +
-      "3. If on a desktop, sign-in will complete automatically.\n" +
-      "   If on SSH/headless, copy the URL or 'code=' and paste below:\n" +
-      "===============================================================\n",
+    instructions,
   });
 
   // Race: loopback server vs. interactive terminal prompt
@@ -563,7 +595,9 @@ export async function loginAntigravityHeadless(callbacks: any): Promise<any> {
       while (true) {
         if (callbacks.signal?.aborted) throw new Error("Login cancelled");
         const raw = await callbacks.onPrompt({
-          message: "Paste the full callback URL (or authorization code):",
+          message: headless
+            ? "Paste the callback URL or authorization code here:"
+            : "Waiting for browser callback (or paste URL/code here):",
           placeholder: "http://localhost:51121/oauth-callback?code=...",
         });
         if (!raw) continue;
