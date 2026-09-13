@@ -1,0 +1,18 @@
+{
+  "name": "pi-agy-headless",
+  "version": "1.0.0",
+  "description": "Standalone headless Antigravity extension for Pi with Gemini 3.8 Flash support",
+  "license": "MIT",
+  "author": "Jeff Huen",
+  "pi": {
+    "extensions": [
+      "pi-agy-headless.ts"
+    ]
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "antigravity",
+    "gemini"
+  ]
+}
