@@ -462,12 +462,13 @@ function generatePKCE(): { verifier: string; challenge: string } {
 }
 
 function parsePastedCallback(raw: string, expectedState: string): string {
-  const text = (raw ?? "").trim();
+  let text = (raw ?? "").trim();
+  text = text.replace(/^['"]|['"]$/g, "").trim();
   if (!text) throw new Error("Empty input. Paste the full redirect URL or the authorization code.");
 
   // If user pasted bare code
-  if (!text.includes("http") && !text.includes("code=")) {
-    return text;
+  if (!text.includes("http://") && !text.includes("https://") && !text.includes("code=")) {
+    return decodeURIComponent(text);
   }
 
   let url: URL;
@@ -486,7 +487,7 @@ function parsePastedCallback(raw: string, expectedState: string): string {
   if (!code) throw new Error("Missing 'code' parameter in pasted URL.");
   if (state && state !== expectedState) throw new Error("OAuth state mismatch. Please try /login antigravity again.");
 
-  return code;
+  return decodeURIComponent(code);
 }
 
 // --- Headless vs Desktop Environment Detection ---
@@ -564,13 +565,16 @@ export async function loginAntigravityHeadless(callbacks: any): Promise<any> {
   const instructions = headless
     ? "\n" +
       "===============================================================\n" +
-      " Google Sign-In (Headless / Remote SSH Detected)\n" +
+      " Google Sign-In (Remote SSH / Headless Mode)\n" +
       "===============================================================\n" +
       "1. Open this URL on your local browser (phone or laptop):\n\n" +
       `   ${fullAuthUrl}\n\n` +
       "2. Sign in and approve Google Cloud Code permissions.\n" +
-      "3. When the browser redirects to http://localhost:51121/...,\n" +
-      "   copy the URL (or 'code=...') from your address bar and paste below:\n" +
+      "3. When done, your browser will redirect to http://localhost:51121/...\n" +
+      "   (NOTE: The page may say 'Site can't be reached' — this is NORMAL!)\n" +
+      "4. Copy the entire URL from your browser address bar and paste below:\n" +
+      "===============================================================\n" +
+      "TIP: If you connect with 'ssh -L 51121:localhost:51121', it finishes automatically!\n" +
       "===============================================================\n"
     : "\n" +
       "===============================================================\n" +
