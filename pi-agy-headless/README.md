@@ -40,7 +40,6 @@ pi install ./pi-agy-headless
 | Public Model ID | Upstream Runtime Model | Supported Thinking Levels | Context Window | Max Output |
 | :--- | :--- | :--- | :--- | :--- |
 | `gemini-3.8-flash` | `gemini-3.8-flash-high` *(default)* | `low`, `medium`, `high` | 1,048,576 | 65,536 |
-| `gemini-3.8-flash-high` | `gemini-3.8-flash-high` | `high` | 1,048,576 | 65,536 |
 | `gemini-3.7-flash` | `gemini-3.7-flash-high` | `low`, `medium`, `high` | 1,048,576 | 65,536 |
 | `gemini-3.6-flash` | `gemini-3.6-flash-high` | `low`, `medium`, `high` | 1,048,576 | 65,536 |
 | `gemini-3.1-pro` | `gemini-pro-agent` | `low`, `high` | 1,048,576 | 65,535 |
